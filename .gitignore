@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+
+# IDE and operating-system files
+.vscode/
+.idea/
+.DS_Store
+
+# Research notes and exported documents
+*.pdf
+
+# Runtime logs and caches
+logs/
+*.log
+cache/
+.cache/
+
+# Local datasets. Keep only the placement guide.
+data/*
+!data/README.md
+
+# Generated experiment artifacts. Keep only the directory guide.
+results/*
+!results/AgentAttrPrune/
+results/AgentAttrPrune/*
+!results/AgentAttrPrune/README.md
+
+# Local model weights
+models/
+checkpoints/
+*.bin
+*.ckpt
+*.pt
+*.pth
+*.safetensors

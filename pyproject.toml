@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "AgentAttrPrune"
+version = "0.1.0"
+description = "Sentence-attribution edge pruning for local LLM multi-agent systems"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.1",
+  "transformers>=4.51",
+  "accelerate>=0.26",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "matplotlib>=3.7",
+  "tqdm>=4.66",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["AgentAttrPrune*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
