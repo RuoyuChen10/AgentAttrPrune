@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
@@ -23,10 +23,15 @@ class GraphResult:
     reviewer_output: dict[str, Any]
     metrics: dict[str, int | float]
     edge_counts: dict[str, Any]
+    answer_normalizer: Callable[[Any], str] = field(
+        default=MMLUPromptSet.normalize_answer,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def parsed_answer(self) -> str:
-        return MMLUPromptSet.normalize_answer(self.final_answer)
+        return self.answer_normalizer(self.final_answer)
 
     def to_trace_final(self) -> dict[str, Any]:
         return {
@@ -443,6 +448,7 @@ class MultiAgentGraph:
             reviewer_output=reviewer_output,
             metrics=metrics,
             edge_counts=self._edge_counts(),
+            answer_normalizer=self.prompt_set.normalize_answer,
         )
 
     async def arun_sample(self, *args: Any, **kwargs: Any) -> GraphResult:

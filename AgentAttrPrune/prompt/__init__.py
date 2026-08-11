@@ -1,3 +1,34 @@
-from .mmlu import MMLUPromptSet, ROLE_DESCRIPTIONS, WORKER_ROLES
+from .gsm8k import (
+    GSM8KPromptSet,
+    ROLE_DESCRIPTIONS as GSM8K_ROLE_DESCRIPTIONS,
+    WORKER_ROLES as GSM8K_WORKER_ROLES,
+)
+from .humaneval import (
+    HumanEvalPromptSet,
+    ROLE_DESCRIPTIONS as HUMANEVAL_ROLE_DESCRIPTIONS,
+    WORKER_ROLES as HUMANEVAL_WORKER_ROLES,
+    extract_python_code,
+)
+from .mmlu import (
+    MMLUPromptSet,
+    ROLE_DESCRIPTIONS as MMLU_ROLE_DESCRIPTIONS,
+    WORKER_ROLES as MMLU_WORKER_ROLES,
+)
 
-__all__ = ["MMLUPromptSet", "ROLE_DESCRIPTIONS", "WORKER_ROLES"]
+ROLE_DESCRIPTIONS = MMLU_ROLE_DESCRIPTIONS
+WORKER_ROLES = MMLU_WORKER_ROLES
+
+__all__ = [
+    "GSM8KPromptSet",
+    "GSM8K_ROLE_DESCRIPTIONS",
+    "GSM8K_WORKER_ROLES",
+    "HUMANEVAL_ROLE_DESCRIPTIONS",
+    "HUMANEVAL_WORKER_ROLES",
+    "HumanEvalPromptSet",
+    "MMLUPromptSet",
+    "MMLU_ROLE_DESCRIPTIONS",
+    "MMLU_WORKER_ROLES",
+    "ROLE_DESCRIPTIONS",
+    "WORKER_ROLES",
+    "extract_python_code",
+]

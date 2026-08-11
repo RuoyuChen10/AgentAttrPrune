@@ -6,6 +6,7 @@ import argparse
 import csv
 from pathlib import Path
 
+from AgentAttrPrune.datasets import BENCHMARKS
 from experiments_attrprune.common import (
     DEFAULT_MODEL,
     config_fingerprint,
@@ -15,12 +16,6 @@ from experiments_attrprune.common import (
 )
 
 
-EVALUATIONS = ("dense_val", "binary_val", "token_ratio_val")
-EXPECTED_MODES = {
-    "dense_val": "dense",
-    "binary_val": "binary",
-    "token_ratio_val": "token_ratio",
-}
 REQUIRED_SUMMARY_FIELDS = {
     "split",
     "start_index",
@@ -42,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build a fair-comparison summary for one AgentAttrPrune run."
     )
+    parser.add_argument("--benchmark", choices=BENCHMARKS, default="mmlu")
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--results-root", type=Path, default=None)
     parser.add_argument("--run-name", default=None)
@@ -55,8 +51,18 @@ def build_comparison(run_dir: Path) -> dict:
     expected_fingerprint = run_config["fingerprint"]
     if config_fingerprint(run_config) != expected_fingerprint:
         raise ValueError("run_config.json fingerprint is invalid")
+    evaluation_split = str(
+        (run_config.get("splits") or {}).get("evaluation", "val")
+    )
+    evaluations = tuple(
+        f"{mode}_{evaluation_split}" for mode in ("dense", "binary", "token_ratio")
+    )
+    expected_modes = {
+        f"{mode}_{evaluation_split}": mode
+        for mode in ("dense", "binary", "token_ratio")
+    }
     summaries = {}
-    for name in EVALUATIONS:
+    for name in evaluations:
         path = run_dir / "evaluation" / name / "evaluation_summary.json"
         if not path.exists():
             raise FileNotFoundError(f"Missing evaluation summary: {path}")
@@ -66,10 +72,10 @@ def build_comparison(run_dir: Path) -> dict:
                 f"{name} was produced from run fingerprint "
                 f"{summary.get('run_fingerprint')!r}, expected {expected_fingerprint!r}"
             )
-        if summary.get("mode") != EXPECTED_MODES[name]:
+        if summary.get("mode") != expected_modes[name]:
             raise ValueError(
                 f"{name} declares mode {summary.get('mode')!r}, "
-                f"expected {EXPECTED_MODES[name]!r}"
+                f"expected {expected_modes[name]!r}"
             )
         missing = sorted(REQUIRED_SUMMARY_FIELDS - summary.keys())
         if missing:
@@ -83,21 +89,24 @@ def build_comparison(run_dir: Path) -> dict:
         "dataset_size",
         "total",
     )
+    dense_name = f"dense_{evaluation_split}"
+    binary_name = f"binary_{evaluation_split}"
+    token_ratio_name = f"token_ratio_{evaluation_split}"
     dense_selection = {
-        field: summaries["dense_val"].get(field) for field in selection_fields
+        field: summaries[dense_name].get(field) for field in selection_fields
     }
-    for name in ("binary_val", "token_ratio_val"):
+    for name in (binary_name, token_ratio_name):
         selection = {field: summaries[name].get(field) for field in selection_fields}
         if selection != dense_selection:
             raise ValueError(
-                f"{name} evaluation selection differs from dense_val: "
+                f"{name} evaluation selection differs from {dense_name}: "
                 f"{selection!r} vs {dense_selection!r}"
             )
-        if summaries[name]["candidate_edges"] != summaries["dense_val"][
+        if summaries[name]["candidate_edges"] != summaries[dense_name][
             "candidate_edges"
         ]:
             raise ValueError(
-                f"{name} candidate topology differs from dense_val"
+                f"{name} candidate topology differs from {dense_name}"
             )
 
     rows = []
@@ -117,8 +126,8 @@ def build_comparison(run_dir: Path) -> dict:
             }
         )
 
-    dense = summaries["dense_val"]
-    for name in ("binary_val", "token_ratio_val"):
+    dense = summaries[dense_name]
+    for name in (binary_name, token_ratio_name):
         summary = summaries[name]
         summary["delta_vs_dense"] = {
             "accuracy": summary["accuracy"] - dense["accuracy"],
@@ -133,6 +142,7 @@ def build_comparison(run_dir: Path) -> dict:
     return {
         "schema_version": 1,
         "run_fingerprint": expected_fingerprint,
+        "benchmark": str(run_config.get("benchmark", "mmlu")),
         "run_config": str(run_dir / "run_config.json"),
         "fairness_contract": {
             "same_model": True,
@@ -167,6 +177,7 @@ def main() -> None:
         seed=args.seed,
         results_root=args.results_root,
         run_name=args.run_name,
+        benchmark=args.benchmark,
     )
     comparison = build_comparison(run_dir)
     json_path = write_json(run_dir / "comparison_summary.json", comparison)

@@ -1,4 +1,4 @@
-"""Evaluate dense or attribution-pruned graphs on a complete MMLU selection."""
+"""Evaluate dense or attribution-pruned graphs on a benchmark selection."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import time
 from typing import Any, Mapping, Sequence
 
@@ -15,21 +16,28 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from AgentAttrPrune.datasets import MMLUDataset
+from AgentAttrPrune.datasets import (
+    BENCHMARKS,
+    GSM8KDataset,
+    HumanEvalDataset,
+    MMLUDataset,
+    benchmark_definition,
+    evaluate_prediction,
+)
 from AgentAttrPrune.graph import MultiAgentGraph
 from AgentAttrPrune.llm import HFChat
 from AgentAttrPrune.pruning import RoundPolicy
 from AgentAttrPrune.tracing import GenerationTraceRecorder
 from experiments_attrprune.common import (
-    DEFAULT_DATA_DIR,
     DEFAULT_MODEL,
     ExperimentPaths,
+    benchmark_data_identity,
     canonical_model_name,
     config_fingerprint,
+    dataset_identities_match,
+    default_data_dir,
     hf_model_reference,
     load_json,
-    mmlu_data_identity,
-    normalize_answer,
     resolve_run_dir,
     worker_specs_from_config,
     write_json,
@@ -52,15 +60,34 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "word-ratio-attribution policy."
         )
     )
+    parser.add_argument("--benchmark", choices=BENCHMARKS, default="mmlu")
     parser.add_argument("--model-name", default=str(DEFAULT_MODEL))
-    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument("--data-dir", type=Path, default=None)
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--results-root", type=Path, default=None)
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--mode", choices=EVALUATION_MODES, required=True)
-    parser.add_argument("--split", choices=["dev", "val", "test"], default="val")
+    parser.add_argument(
+        "--policy-json",
+        type=Path,
+        default=None,
+        help=(
+            "Use this explicit policy instead of attribution/pruned_policy_<mode>.json. "
+            "This is useful for evaluating multiple pruning rates of one metric."
+        ),
+    )
+    parser.add_argument(
+        "--evaluation-name",
+        default=None,
+        help=(
+            "Optional output-directory prefix. The split is appended automatically; "
+            "for example static_token_ratio_prune_05pct becomes "
+            "static_token_ratio_prune_05pct_val."
+        ),
+    )
+    parser.add_argument("--split", default=None)
     parser.add_argument("--start-index", type=int, default=0)
-    parser.add_argument("--limit", type=int, default=1531)
+    parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--save-traces",
@@ -68,7 +95,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Write one schema-v1 generation trace for every evaluated sample.",
     )
     parser.add_argument("--no-download", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    definition = benchmark_definition(args.benchmark)
+    args.split = args.split or definition.evaluation_split
+    if args.limit is None:
+        args.limit = definition.evaluation_limit
+    return args
 
 
 def set_reproducible(seed: int) -> None:
@@ -120,6 +152,14 @@ def _load_run_config(paths: ExperimentPaths, args: argparse.Namespace) -> dict:
             "Evaluation seed must match run_config.json exactly: "
             f"configured={config['seed']!r}, requested={args.seed!r}"
         )
+    requested_benchmark = str(getattr(args, "benchmark", "mmlu")).lower()
+    configured_benchmark = str(config.get("benchmark", "mmlu")).lower()
+    if configured_benchmark != requested_benchmark:
+        raise ValueError(
+            "Evaluation benchmark must match run_config.json exactly: "
+            f"configured={configured_benchmark!r}, "
+            f"requested={requested_benchmark!r}"
+        )
     configured_split = str((config.get("splits") or {}).get("evaluation", ""))
     if configured_split != args.split:
         raise ValueError(
@@ -134,6 +174,7 @@ def _resolve_policy(
     *,
     paths: ExperimentPaths,
     config: Mapping[str, Any],
+    policy_json: Path | None = None,
 ) -> tuple[RoundPolicy, Path | None]:
     workers = list(config["workers"])
     agent_ids = [str(item["agent_id"]) for item in workers]
@@ -142,6 +183,8 @@ def _resolve_policy(
     num_rounds = int(config["num_rounds"])
 
     if mode == "dense":
+        if policy_json is not None:
+            raise ValueError("--policy-json cannot be used with --mode dense")
         policy = RoundPolicy.dense(
             agent_ids,
             num_rounds=num_rounds,
@@ -149,10 +192,13 @@ def _resolve_policy(
             agent_types=agent_types,
         )
         return policy, None
-    try:
-        source_path = paths.attribution / POLICY_FILENAMES[mode]
-    except KeyError as error:
-        raise ValueError(f"Unsupported evaluation mode: {mode!r}") from error
+    if policy_json is not None:
+        source_path = Path(policy_json)
+    else:
+        try:
+            source_path = paths.attribution / POLICY_FILENAMES[mode]
+        except KeyError as error:
+            raise ValueError(f"Unsupported evaluation mode: {mode!r}") from error
     if not source_path.is_file():
         raise FileNotFoundError(
             f"Missing attribution policy {source_path}; run the attribution stage first."
@@ -177,6 +223,20 @@ def _resolve_policy(
             f"does not match evaluation mode {mode!r}"
         )
     return policy, source_path
+
+
+def _evaluation_directory_name(
+    mode: str,
+    split: str,
+    evaluation_name: str | None,
+) -> str:
+    prefix = evaluation_name or mode
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", prefix):
+        raise ValueError(
+            "--evaluation-name must contain only letters, numbers, '.', '_' or '-', "
+            "and must start with a letter or number"
+        )
+    return f"{prefix}_{split}"
 
 
 def _write_jsonl_atomic(path: Path, records: Sequence[Mapping[str, Any]]) -> Path:
@@ -212,7 +272,16 @@ def _trace_final(result: Any, *, gold: str, parsed: str, correct: bool) -> dict:
 
 
 async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
-    if args.start_index < 0 or args.limit < 1:
+    benchmark = str(getattr(args, "benchmark", "mmlu")).lower()
+    definition = benchmark_definition(benchmark)
+    requested_data_dir = getattr(args, "data_dir", None)
+    split = getattr(args, "split", None) or definition.evaluation_split
+    limit = getattr(args, "limit", None)
+    if limit is None:
+        limit = definition.evaluation_limit
+    args.benchmark = benchmark
+    args.split = split
+    if args.start_index < 0 or limit < 1:
         raise ValueError("--start-index must be non-negative and --limit positive")
 
     os.environ["HF_CHAT_ENABLE_THINKING"] = "0"
@@ -225,48 +294,76 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         seed=args.seed,
         results_root=args.results_root,
         run_name=args.run_name,
+        benchmark=benchmark,
     )
     paths = ExperimentPaths(Path(run_dir))
     config = _load_run_config(paths, args)
-    policy, source_policy = _resolve_policy(args.mode, paths=paths, config=config)
+    configured_dataset = config.get("dataset") or {}
+    configured_data_dir = configured_dataset.get("data_root") or configured_dataset.get(
+        "requested_data_dir"
+    )
+    data_dir = Path(
+        requested_data_dir or configured_data_dir or default_data_dir(benchmark)
+    )
+    policy, source_policy = _resolve_policy(
+        args.mode,
+        paths=paths,
+        config=config,
+        policy_json=getattr(args, "policy_json", None),
+    )
 
-    dataset = MMLUDataset(
-        split=args.split,
-        data_dir=args.data_dir,
+    dataset_classes = {
+        "mmlu": MMLUDataset,
+        "gsm8k": GSM8KDataset,
+        "humaneval": HumanEvalDataset,
+    }
+    dataset = dataset_classes[benchmark](
+        split=split,
+        data_dir=data_dir,
         download=not args.no_download,
     )
     expected_data = config.get("dataset")
     if expected_data:
-        actual_data = mmlu_data_identity(
-            args.data_dir,
+        actual_data = benchmark_data_identity(
+            benchmark,
+            data_dir,
             splits=(expected_data.get("splits") or {}).keys(),
             shuffle_seed=int(expected_data.get("shuffle_seed", 888)),
         )
-        if actual_data != expected_data:
+        if not dataset_identities_match(expected_data, actual_data):
             raise ValueError(
-                "MMLU data identity differs from run_config.json; refusing to "
-                "mix a different data directory or CSV snapshot into this run."
+                f"{benchmark} data identity differs from run_config.json; refusing to "
+                "mix a different data directory or dataset snapshot into this run."
             )
     if args.start_index >= len(dataset):
         raise ValueError(
             f"--start-index {args.start_index} is outside dataset size {len(dataset)}"
         )
     start = args.start_index
-    stop = min(len(dataset), start + args.limit)
+    stop = min(len(dataset), start + limit)
 
-    evaluation_dir = paths.evaluation / f"{args.mode}_{args.split}"
+    evaluation_name = getattr(args, "evaluation_name", None)
+    evaluation_dir_name = _evaluation_directory_name(
+        args.mode, split, evaluation_name
+    )
+    evaluation_dir = paths.evaluation / evaluation_dir_name
     evaluation_dir.mkdir(parents=True, exist_ok=True)
     resolved_policy_path = policy.to_json(evaluation_dir / "resolved_policy.json")
 
     decoding = config["decoding"]
     llm = HFChat(hf_model_reference(config["model_name"]))
+    graph_kwargs = {
+        "num_rounds": int(config["num_rounds"]),
+        "policy": policy,
+        "temperature": float(decoding["temperature"]),
+        "max_new_tokens": int(decoding["max_new_tokens"]),
+    }
+    if benchmark != "mmlu":
+        graph_kwargs["prompt_set"] = definition.prompt_set
     graph = MultiAgentGraph(
         llm,
         worker_specs_from_config(config),
-        num_rounds=int(config["num_rounds"]),
-        policy=policy,
-        temperature=float(decoding["temperature"]),
-        max_new_tokens=int(decoding["max_new_tokens"]),
+        **graph_kwargs,
     )
 
     records: list[dict[str, Any]] = []
@@ -280,7 +377,7 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
 
     indices = tqdm(
         range(start, stop),
-        desc=f"{args.mode} {args.split} evaluation",
+        desc=f"{args.mode} {benchmark} {split} evaluation",
     )
     for sample_index in indices:
         set_reproducible(args.seed + sample_index)
@@ -297,6 +394,7 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                     **config,
                     "phase": "evaluation",
                     "evaluation_mode": args.mode,
+                    "evaluation_name": evaluation_name or args.mode,
                     "sample_index": sample_index,
                 },
                 sample=sample,
@@ -308,9 +406,10 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             phase="evaluation",
             sample_index=sample_index,
         )
-        parsed = normalize_answer(result.final_answer)
-        gold = normalize_answer(sample["answer"])
-        is_correct = parsed == gold
+        outcome = evaluate_prediction(benchmark, result.final_answer, sample)
+        parsed = str(outcome["parsed_answer"])
+        gold = str(outcome["gold_answer"])
+        is_correct = bool(outcome["correct"])
         metrics = _mapping(result.metrics)
         edge_counts = _mapping(result.edge_counts)
         if common_edge_counts is None:
@@ -331,11 +430,13 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             {
                 "sample_index": sample_index,
                 "subject": str(sample.get("subject", "")),
+                "task_id": str(sample.get("task_id", "")),
                 "gold_answer": gold,
                 "parsed_answer": parsed,
                 "correct": is_correct,
                 "output": str(result.final_answer),
                 "metrics": metrics,
+                "evaluation_details": outcome.get("details") or {},
                 "trace_json": str(trace_path) if recorder is not None else None,
             }
         )
@@ -357,7 +458,10 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": 1,
         "run_fingerprint": config["fingerprint"],
         "mode": args.mode,
-        "split": args.split,
+        "evaluation_name": evaluation_name or args.mode,
+        "evaluation_directory": evaluation_dir_name,
+        "benchmark": benchmark,
+        "split": split,
         "start_index": start,
         "stop_index_exclusive": stop,
         "dataset_size": len(dataset),

@@ -7,10 +7,10 @@ recover each receiving node's original output score, and aggregates those
 sentence selections into round-specific edge-importance matrices and
 deterministic pruning policies.
 
-The current release focuses on local Hugging Face/Qwen3 inference, MMLU, and
-sentence-level edge attribution. It does not include AgentPrune's trainable
-edge optimizer, hosted model APIs, visual tasks, tool use, AutoGen, GSM8K, or
-HumanEval.
+The current release focuses on local Hugging Face/Qwen3 inference,
+sentence-level edge attribution, and three text benchmarks: MMLU, GSM8K, and
+HumanEval. It does not include AgentPrune's trainable edge optimizer, hosted
+model APIs, visual tasks, tool use, or AutoGen.
 
 See [the attribution and edge-pruning specification](docs/attribution_edge_pruning.md)
 for the full algorithm, matrix orientation, schemas, and interpretation
@@ -21,13 +21,13 @@ boundaries.
 ```text
 AgentAttrPrune/
 ├── AgentAttrPrune/             # Graph, HF backend, tracing, attribution, policy
-├── experiments_attrprune/      # MMLU calibration, evaluation, and shell entrypoint
+├── experiments_attrprune/      # Benchmark calibration, evaluation, and shell entrypoints
 ├── docs/                       # Algorithm and output-schema documentation
 ├── baselines/                  # Contract for future external baselines
 ├── data/                       # Local datasets; contents are ignored by Git
 ├── results/AgentAttrPrune/     # Generated experiment artifacts; ignored by Git
 ├── tests/
-├── run_full_mmlu.sh
+├── run_full_*.sh              # Complete MMLU, GSM8K, and HumanEval launchers
 └── pyproject.toml
 ```
 
@@ -39,7 +39,25 @@ configuration, and artifact paths.
 
 ### Dense graph and trace collection
 
-The default MMLU graph has five workers and two reasoning rounds.
+The benchmark configurations are intentionally task-specific. Their default
+worker counts and role order match the corresponding AgentPrune experiment and
+prompt-set defaults:
+
+| Benchmark | Calibration / evaluation | Workers | Roles in matrix order | Events at 2 rounds | Worker candidate edges |
+|---|---|---:|---|---:|---:|
+| MMLU | `dev` / `val` | 5 | Knowlegable Expert; Critic; Mathematician; Psychologist; Historian | 11 | 45 |
+| GSM8K | `train` / `test` | 4 | Math Solver; Mathematical Analyst; Programming Expert; Inspector | 9 | 28 |
+| HumanEval | fixed `dev` / disjoint `test` | 5 | Project Manager; Algorithm Designer; Programming Expert; Test Analyst; Bug Fixer | 11 | 45 |
+
+They are therefore not the same multi-agent system in worker count or roles.
+They do share one graph executor, two-round topology, trace schema, attribution
+search, matrix definition, pruning logic, and evaluation path. The original
+AgentPrune entrypoints name the worker implementations `AnalyzeAgent`,
+`MathSolver`, and `CodeWriting`, respectively. AgentAttrPrune standardizes their
+execution through `AnalyzeAgent` while preserving the benchmark-specific roles
+and prompts, followed by one task-aware dense reviewer. A policy is bound to its
+benchmark, worker order, roles, dataset snapshot, and run fingerprint; it cannot
+be applied to another benchmark accidentally.
 
 - Within each round, spatial communication is an executable ordered DAG:
   earlier workers send to later workers.
@@ -68,7 +86,7 @@ record. Only sentences inside incoming agent outputs or temporal history are
 removable. The following content always remains visible:
 
 - system prompts;
-- the MMLU question and answer options;
+- the benchmark task (including MMLU answer options when present);
 - message headers and source labels;
 - separators and chat-template tokens.
 
@@ -214,7 +232,7 @@ token-ratio/binary/word-ratio policies.
 | `AgentAttrPrune/attribution/visualization.py` | Sentence SVGs, insertion curves, HTML reports, matrix heatmaps |
 | `AgentAttrPrune/attribution/calibrator.py` | Per-event attribution, caching, aggregation, policy publication |
 | `AgentAttrPrune/pruning/policy.py` | Validation and replay of round-specific spatial/temporal masks |
-| `experiments_attrprune/common.py` | Run paths, MMLU identity, worker order, configuration fingerprint |
+| `experiments_attrprune/common.py` | Run paths, dataset identity, worker order, configuration fingerprint |
 | `experiments_attrprune/*.py` | Thin experiment CLIs |
 
 ## Invariants
@@ -224,7 +242,7 @@ token-ratio/binary/word-ratio policies.
 - Dense and pruned runs share the same workers, prompts, reviewer, decoding
   parameters, and execution loop.
 - Reviewer edges remain dense and do not enter worker matrices.
-- Policies are calibrated only from baseline-correct MMLU dev traces.
+- Policies are calibrated only from baseline-correct calibration traces.
 - Val/test samples never contribute to attribution aggregation.
 - Formal traces require exact prompt and generated token IDs.
 - Sample matrices, aggregate matrices, policies, and evaluations are bound to
@@ -260,8 +278,8 @@ The repository defaults to:
 /egr/research-optml/ruoyu.chen/Models/Qwen3-8B
 ```
 
-Override it with `MODEL_PATH`. See [data/README.md](data/README.md) for MMLU
-placement.
+Override it with `MODEL_PATH`. See [data/README.md](data/README.md) for dataset
+placement and download commands.
 
 ## Running MMLU
 
@@ -367,21 +385,79 @@ SALIENCY_FLOOR=0.4 ./experiments_attrprune/run_mmlu.sh render
 Use a new `RUN_NAME` whenever the model, data snapshot, worker configuration,
 round count, or generation settings change.
 
+## Running GSM8K and HumanEval
+
+Download all missing files:
+
+```bash
+python -m AgentAttrPrune.datasets.download all --data-root data
+```
+
+The root launchers default to eight visible GPUs, Qwen3-8B, two rounds,
+`MAX_NEW_TOKENS=2048`, and the complete local dataset selections. `calibrate`
+uses only the calibration split and writes all per-node attribution SVG/HTML,
+sample matrices, aggregate heatmaps, and policies:
+
+```bash
+# All 7,473 GSM8K train samples; no test evaluation
+./run_full_gsm8k.sh calibrate
+
+# All 80 examples in the fixed HumanEval calibration partition; no test evaluation
+./run_full_humaneval.sh calibrate
+```
+
+Use `all` to append frozen-policy evaluation on GSM8K test or the disjoint
+HumanEval test partition:
+
+```bash
+./run_full_gsm8k.sh all
+./run_full_humaneval.sh all
+```
+
+The lightweight wrappers expose the same stages and environment controls:
+
+```bash
+# GSM8K train calibration -> test evaluation
+DRY_RUN=1 ./experiments_attrprune/run_gsm8k.sh all
+./experiments_attrprune/run_gsm8k.sh one-sample
+
+# Fixed HumanEval dev calibration -> disjoint test evaluation
+DRY_RUN=1 ./experiments_attrprune/run_humaneval.sh all
+./experiments_attrprune/run_humaneval.sh one-sample
+```
+
+The shared entrypoint is also available directly:
+
+```bash
+BENCHMARK=gsm8k ./experiments_attrprune/run_benchmark.sh calibrate
+BENCHMARK=humaneval ./experiments_attrprune/run_benchmark.sh eval-dense
+```
+
+Use `DATA_DIR`, `CALIBRATION_LIMIT`, `EVALUATION_LIMIT`,
+`CALIBRATION_SPLIT`, and `EVALUATION_SPLIT` with the shared entrypoint.
+HumanEval correctness runs generated Python in a limited subprocess; this is
+not a security boundary for hostile code.
+
 ## Common environment variables
 
 | Variable | Shell default | Meaning |
 |---|---:|---|
 | `MODEL_PATH` | local Qwen3-8B path | Generation and attribution model |
 | `MMLU_DATA_DIR` | `data/MMLU` | MMLU root or directory containing `data/` |
+| `GSM8K_DATA_DIR` | `data/GSM8K` | Directory containing `train.jsonl` and `test.jsonl` |
+| `HUMANEVAL_DATA_DIR` | `data/HumanEval` | Directory containing `humaneval-py.jsonl` |
 | `RESULTS_ROOT` | `results/AgentAttrPrune` | Generated-artifact root |
 | `RUN_NAME` | derived from model/seed | Run subdirectory |
+| `CALIBRATION_START_INDEX` | `0` | Generic runner's first calibration sample |
+| `CALIBRATION_LIMIT` | benchmark-specific | Generic runner's calibration sample count |
+| `EVALUATION_LIMIT` | benchmark-specific | Generic runner's frozen-policy evaluation count |
 | `DEV_START_INDEX` | `0` | First shuffled dev sample |
 | `DEV_LIMIT` | `285` | Dev calibration sample count |
 | `VAL_LIMIT` | `1531` | Val evaluation sample count |
 | `NUM_WORKERS` | `5` | Worker count |
 | `NUM_ROUNDS` | `2` | Reasoning rounds |
 | `TEMPERATURE` | `0` | Deterministic generation temperature |
-| `MAX_NEW_TOKENS` | `256` | Per-node generation ceiling in `run_mmlu.sh` |
+| `MAX_NEW_TOKENS` | `2048` | Per-node generation ceiling; generation still stops at EOS |
 | `ATTR_BATCH_SIZE` | `4` | Candidate inference batch size |
 | `TARGET_TOKEN_LIMIT` | unset | Optional attribution-target prefix |
 | `TARGET_RECOVERY` | `0.95` | Early-stop recovery threshold |
@@ -392,7 +468,7 @@ round count, or generation settings change.
 | `KEEP_GOING` | `0` | Collect failures but still reject a partial policy |
 | `DRY_RUN` | `0` | Print commands without executing them |
 
-`run_full_mmlu.sh` overrides the generation ceiling to `512` unless
+All `run_full_*.sh` launchers default the generation ceiling to `2048` unless
 `MAX_NEW_TOKENS` is set explicitly.
 
 Show every stage and override with:
@@ -404,7 +480,7 @@ Show every stage and override with:
 ## Output layout
 
 ```text
-results/AgentAttrPrune/mmlu/qwen3_8b/<run_name>/
+results/AgentAttrPrune/<benchmark>/qwen3_8b/seed_<seed>/
 ├── run_config.json
 ├── calibration/
 │   ├── attempts.jsonl
@@ -434,7 +510,7 @@ results/AgentAttrPrune/mmlu/qwen3_8b/<run_name>/
 └── comparison_summary.csv
 ```
 
-The run configuration records the model, MMLU path and content hashes, worker
+The run configuration records the model, benchmark path and content hashes, worker
 order, rounds, decoding parameters, topology, seed, and fingerprint. Cached
 events, policies, and evaluations are rejected when their fingerprints do not
 match.
@@ -444,7 +520,7 @@ Generated data is ignored by Git. See
 
 ## Fair-comparison protocol
 
-1. Learn policies only from baseline-correct MMLU dev traces.
+1. Learn policies only from baseline-correct calibration traces.
 2. Evaluate every policy on the complete selected val split, including samples
    that the dense baseline answers incorrectly.
 3. Reuse the same graph executor, worker order, roles, prompts, reviewer, and

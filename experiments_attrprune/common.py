@@ -1,8 +1,7 @@
-"""Shared configuration and result-path helpers for MMLU experiments."""
+"""Shared configuration and result-path helpers for benchmark experiments."""
 
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass
 import hashlib
 import json
@@ -11,23 +10,24 @@ from pathlib import Path
 import re
 from typing import Any, Iterable, Mapping
 
+from AgentAttrPrune.datasets import (
+    BENCHMARKS,
+    benchmark_definition,
+    dataset_identity,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = Path("/egr/research-optml/ruoyu.chen/Models/Qwen3-8B")
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "results" / "AgentAttrPrune"
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "MMLU"
+DEFAULT_DATA_DIRS = {
+    "mmlu": DEFAULT_DATA_DIR,
+    "gsm8k": REPO_ROOT / "data" / "GSM8K",
+    "humaneval": REPO_ROOT / "data" / "HumanEval",
+}
 
-WORKER_ROLES = (
-    ("knowledgeable_expert", "Knowlegable Expert"),
-    ("critic", "Critic"),
-    ("mathematician", "Mathematician"),
-    ("psychologist", "Psychologist"),
-    ("historian", "Historian"),
-    ("doctor", "Doctor"),
-    ("lawyer", "Lawyer"),
-    ("economist", "Economist"),
-    ("programmer", "Programmer"),
-)
+WORKER_ROLES = benchmark_definition("mmlu").worker_roles
 
 ANSWER_CHOICES = frozenset("ABCD")
 
@@ -40,36 +40,66 @@ def mmlu_data_identity(
 ) -> dict[str, Any]:
     """Fingerprint the exact MMLU CSV selection used by a formal run."""
 
-    requested = Path(data_dir).expanduser().resolve()
-    root = requested / "data" if (requested / "data").is_dir() else requested
-    split_payload: dict[str, Any] = {}
-    for split in sorted({str(value) for value in splits}):
-        split_dir = root / split
-        csv_paths = sorted(split_dir.glob("*.csv"))
-        if not csv_paths:
-            raise FileNotFoundError(f"No MMLU CSV files found under {split_dir}")
-        digest = hashlib.sha256()
-        record_count = 0
-        for path in csv_paths:
-            relative = path.relative_to(root).as_posix().encode("utf-8")
-            content = path.read_bytes()
-            digest.update(len(relative).to_bytes(8, "big"))
-            digest.update(relative)
-            digest.update(len(content).to_bytes(8, "big"))
-            digest.update(content)
-            with path.open("r", encoding="utf-8", newline="") as handle:
-                record_count += sum(1 for _ in csv.reader(handle))
-        split_payload[split] = {
-            "file_count": len(csv_paths),
-            "record_count": record_count,
-            "sha256": digest.hexdigest(),
-        }
-    return {
-        "requested_data_dir": str(requested),
-        "data_root": str(root.resolve()),
-        "shuffle_seed": int(shuffle_seed),
-        "splits": split_payload,
-    }
+    return dataset_identity(
+        "mmlu",
+        data_dir,
+        splits=splits,
+        shuffle_seed=shuffle_seed,
+    )
+
+
+def benchmark_data_identity(
+    benchmark: str,
+    data_dir: str | Path,
+    *,
+    splits: Iterable[str],
+    shuffle_seed: int = 888,
+) -> dict[str, Any]:
+    return dataset_identity(
+        benchmark,
+        data_dir,
+        splits=splits,
+        shuffle_seed=shuffle_seed,
+    )
+
+
+def dataset_identities_match(
+    expected: Mapping[str, Any],
+    actual: Mapping[str, Any],
+) -> bool:
+    """Compare a stored identity with a newly computed compatible superset.
+
+    Dataset identity schemas may gain descriptive fields over time. A formal
+    run created by an older schema remains valid when every field it recorded
+    still matches exactly and the new identity only adds fields. Lists retain
+    exact length/order semantics; scalar values, paths, counts, hashes, and
+    shuffle seeds must remain equal.
+    """
+
+    def matches(stored: Any, computed: Any) -> bool:
+        if isinstance(stored, Mapping):
+            return isinstance(computed, Mapping) and all(
+                key in computed and matches(value, computed[key])
+                for key, value in stored.items()
+            )
+        if isinstance(stored, (list, tuple)):
+            return (
+                isinstance(computed, (list, tuple))
+                and len(stored) == len(computed)
+                and all(matches(left, right) for left, right in zip(stored, computed))
+            )
+        return stored == computed
+
+    return matches(expected, actual)
+
+
+def default_data_dir(benchmark: str) -> Path:
+    try:
+        return DEFAULT_DATA_DIRS[str(benchmark).lower()]
+    except KeyError as error:
+        raise ValueError(
+            f"Unsupported benchmark {benchmark!r}; choose from {', '.join(BENCHMARKS)}"
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -115,16 +145,23 @@ def resolve_run_dir(
     seed: int,
     results_root: str | Path | None = None,
     run_name: str | None = None,
+    benchmark: str = "mmlu",
 ) -> Path:
     root = Path(results_root or os.environ.get("RESULTS_ROOT", DEFAULT_RESULTS_ROOT))
     if run_name:
         return root / run_name
-    return root / "mmlu" / model_slug(model_name) / f"seed_{seed}"
+    name = benchmark_definition(benchmark).name
+    return root / name / model_slug(model_name) / f"seed_{seed}"
 
 
-def worker_metadata(num_workers: int) -> list[dict[str, Any]]:
-    if not 1 <= num_workers <= len(WORKER_ROLES):
-        raise ValueError(f"num_workers must be between 1 and {len(WORKER_ROLES)}")
+def worker_metadata(
+    num_workers: int,
+    *,
+    benchmark: str = "mmlu",
+) -> list[dict[str, Any]]:
+    roles = benchmark_definition(benchmark).worker_roles
+    if not 1 <= num_workers <= len(roles):
+        raise ValueError(f"num_workers must be between 1 and {len(roles)}")
     return [
         {
             "agent_id": agent_id,
@@ -132,7 +169,7 @@ def worker_metadata(num_workers: int) -> list[dict[str, Any]]:
             "agent_type": "AnalyzeAgent",
             "node_index": index,
         }
-        for index, (agent_id, role) in enumerate(WORKER_ROLES[:num_workers])
+        for index, (agent_id, role) in enumerate(roles[:num_workers])
     ]
 
 
@@ -162,6 +199,7 @@ def build_run_config(
     calibration_split: str = "dev",
     evaluation_split: str = "val",
     dataset_identity: Mapping[str, Any] | None = None,
+    benchmark: str = "mmlu",
 ) -> dict[str, Any]:
     if num_rounds < 1:
         raise ValueError("num_rounds must be positive")
@@ -169,11 +207,12 @@ def build_run_config(
         raise ValueError("temperature must be non-negative")
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be positive")
+    benchmark = benchmark_definition(benchmark).name
     config: dict[str, Any] = {
         "schema_version": 1,
-        "benchmark": "mmlu",
+        "benchmark": benchmark,
         "model_name": canonical_model_name(model_name),
-        "workers": worker_metadata(num_workers),
+        "workers": worker_metadata(num_workers, benchmark=benchmark),
         "num_rounds": num_rounds,
         "decoding": {
             "temperature": temperature,
@@ -288,6 +327,8 @@ def normalize_answer(value: Any) -> str:
 
 def trace_is_correct(trace: Mapping[str, Any]) -> bool:
     final = trace.get("final") or {}
+    if "correct" in final:
+        return bool(final["correct"])
     parsed = final.get("parsed_answer", final.get("answer", final.get("output", "")))
     gold = final.get("gold_answer", (trace.get("sample") or {}).get("answer", ""))
     return normalize_answer(parsed) == normalize_answer(gold)

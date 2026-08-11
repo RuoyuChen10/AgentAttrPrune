@@ -1,4 +1,4 @@
-"""Collect dense MMLU traces for every selected calibration sample."""
+"""Collect dense traces for every selected benchmark calibration sample."""
 
 from __future__ import annotations
 
@@ -15,23 +15,28 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from AgentAttrPrune.datasets import MMLUDataset
+from AgentAttrPrune.datasets import (
+    BENCHMARKS,
+    GSM8KDataset,
+    HumanEvalDataset,
+    MMLUDataset,
+    benchmark_definition,
+    evaluate_prediction,
+)
 from AgentAttrPrune.graph import MultiAgentGraph
 from AgentAttrPrune.llm import HFChat
 from AgentAttrPrune.tracing import GenerationTraceRecorder
 from experiments_attrprune.common import (
-    DEFAULT_DATA_DIR,
     DEFAULT_MODEL,
     ExperimentPaths,
     append_jsonl,
+    benchmark_data_identity,
     build_run_config,
-    canonical_model_name,
     completed_attempt_indices,
+    default_data_dir,
     ensure_run_config,
     hf_model_reference,
     load_jsonl,
-    mmlu_data_identity,
-    normalize_answer,
     resolve_run_dir,
     worker_specs_from_config,
     write_json,
@@ -41,26 +46,39 @@ from experiments_attrprune.common import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the unified dense MMLU graph, record every attempted sample, "
+            "Run the unified dense benchmark graph, record every attempted sample, "
             "and save a full generation trace for every completed prediction."
         )
     )
+    parser.add_argument("--benchmark", choices=BENCHMARKS, default="mmlu")
     parser.add_argument("--model-name", default=str(DEFAULT_MODEL))
-    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument("--data-dir", type=Path, default=None)
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--results-root", type=Path, default=None)
     parser.add_argument("--run-name", default=None)
-    parser.add_argument("--split", choices=["dev", "val", "test"], default="dev")
+    parser.add_argument("--split", default=None)
+    parser.add_argument("--evaluation-split", default=None)
     parser.add_argument("--start-index", type=int, default=0)
-    parser.add_argument("--limit", type=int, default=285)
-    parser.add_argument("--num-workers", type=int, default=5)
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--num-rounds", type=int, default=2)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-download", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    definition = benchmark_definition(args.benchmark)
+    args.data_dir = args.data_dir or default_data_dir(args.benchmark)
+    args.split = args.split or definition.calibration_split
+    args.evaluation_split = (
+        args.evaluation_split or definition.evaluation_split
+    )
+    if args.limit is None:
+        args.limit = definition.calibration_limit
+    if args.num_workers is None:
+        args.num_workers = definition.default_num_workers
+    return args
 
 
 def set_reproducible(seed: int) -> None:
@@ -131,7 +149,22 @@ def write_summary(
 
 
 async def collect(args: argparse.Namespace) -> dict:
-    if args.start_index < 0 or args.limit < 1:
+    benchmark = str(getattr(args, "benchmark", "mmlu")).lower()
+    definition = benchmark_definition(benchmark)
+    data_dir = Path(
+        getattr(args, "data_dir", None) or default_data_dir(benchmark)
+    )
+    split = getattr(args, "split", None) or definition.calibration_split
+    evaluation_split = (
+        getattr(args, "evaluation_split", None) or definition.evaluation_split
+    )
+    limit = getattr(args, "limit", None)
+    if limit is None:
+        limit = definition.calibration_limit
+    num_workers = getattr(args, "num_workers", None)
+    if num_workers is None:
+        num_workers = definition.default_num_workers
+    if args.start_index < 0 or limit < 1:
         raise ValueError("--start-index must be non-negative and --limit positive")
     os.environ["HF_CHAT_ENABLE_THINKING"] = "0"
     os.environ["HF_CHAT_CAPTURE_SCORES"] = "0"
@@ -143,31 +176,48 @@ async def collect(args: argparse.Namespace) -> dict:
         seed=args.seed,
         results_root=args.results_root,
         run_name=args.run_name,
+        benchmark=benchmark,
     )
     paths = ExperimentPaths(run_dir)
-    dataset = MMLUDataset(
-        split=args.split,
-        data_dir=args.data_dir,
+    dataset_classes = {
+        "mmlu": MMLUDataset,
+        "gsm8k": GSM8KDataset,
+        "humaneval": HumanEvalDataset,
+    }
+    dataset = dataset_classes[benchmark](
+        split=split,
+        data_dir=data_dir,
         download=not args.no_download,
     )
+    # A formal run fingerprints both the calibration and evaluation selections.
+    # GSM8K stores them in separate files, so a first-time run must prepare the
+    # evaluation split before dataset_identity() verifies the complete snapshot.
+    if not args.no_download and evaluation_split != split:
+        dataset_classes[benchmark](
+            split=evaluation_split,
+            data_dir=data_dir,
+            download=True,
+        )
     if args.start_index >= len(dataset):
         raise ValueError(
             f"--start-index {args.start_index} is outside dataset size {len(dataset)}"
         )
-    data_identity = mmlu_data_identity(
-        args.data_dir,
-        splits=(args.split, "val"),
+    data_identity = benchmark_data_identity(
+        benchmark,
+        data_dir,
+        splits=(split, evaluation_split),
     )
     config = build_run_config(
         model_name=args.model_name,
-        num_workers=args.num_workers,
+        num_workers=num_workers,
         num_rounds=args.num_rounds,
         temperature=args.temperature,
         max_new_tokens=args.max_new_tokens,
         seed=args.seed,
-        calibration_split=args.split,
-        evaluation_split="val",
+        calibration_split=split,
+        evaluation_split=evaluation_split,
         dataset_identity=data_identity,
+        benchmark=benchmark,
     )
     config = ensure_run_config(paths.run_config, config)
     attempts_path = paths.calibration / "attempts.jsonl"
@@ -181,19 +231,27 @@ async def collect(args: argparse.Namespace) -> dict:
     completed = completed_attempt_indices(attempts_path) if args.resume else set()
 
     start = args.start_index
-    stop = min(len(dataset), start + args.limit)
+    stop = min(len(dataset), start + limit)
     llm = HFChat(hf_model_reference(args.model_name))
+    graph_kwargs = {
+        "num_rounds": args.num_rounds,
+        "policy": None,
+        "temperature": args.temperature,
+        "max_new_tokens": args.max_new_tokens,
+    }
+    if benchmark != "mmlu":
+        graph_kwargs["prompt_set"] = definition.prompt_set
     graph = MultiAgentGraph(
         llm,
         worker_specs_from_config(config),
-        num_rounds=args.num_rounds,
-        policy=None,
-        temperature=args.temperature,
-        max_new_tokens=args.max_new_tokens,
+        **graph_kwargs,
     )
     truncated_sample_indices: list[int] = []
 
-    for sample_index in tqdm(range(start, stop), desc="dense dev calibration"):
+    for sample_index in tqdm(
+        range(start, stop),
+        desc=f"dense {benchmark} {split} calibration",
+    ):
         if sample_index in completed:
             continue
         set_reproducible(args.seed + sample_index)
@@ -217,9 +275,10 @@ async def collect(args: argparse.Namespace) -> dict:
                 phase="calibration",
                 sample_index=sample_index,
             )
-            parsed = normalize_answer(result.final_answer)
-            gold = normalize_answer(sample["answer"])
-            correct = parsed == gold
+            outcome = evaluate_prediction(benchmark, result.final_answer, sample)
+            parsed = str(outcome["parsed_answer"])
+            gold = str(outcome["gold_answer"])
+            correct = bool(outcome["correct"])
             metrics = _metrics_dict(result.metrics)
             metrics["sample_elapsed_seconds"] = time.perf_counter() - started
             trace_final = result.to_trace_final()
@@ -251,6 +310,7 @@ async def collect(args: argparse.Namespace) -> dict:
                         "parsed_answer": parsed,
                         "trace_json": str(trace_path),
                         "metrics": metrics,
+                        "evaluation_details": outcome.get("details") or {},
                         "error": (
                             f"{truncated_events} node output(s) hit "
                             f"max_new_tokens={args.max_new_tokens}"
@@ -268,6 +328,7 @@ async def collect(args: argparse.Namespace) -> dict:
                         "gold_answer": gold,
                         "parsed_answer": parsed,
                         "metrics": metrics,
+                        "evaluation_details": outcome.get("details") or {},
                     },
                 )
             append_jsonl(
@@ -280,6 +341,7 @@ async def collect(args: argparse.Namespace) -> dict:
                     "parsed_answer": parsed,
                     "trace_json": str(trace_path),
                     "metrics": metrics,
+                    "evaluation_details": outcome.get("details") or {},
                 },
             )
         except Exception as error:
@@ -299,7 +361,7 @@ async def collect(args: argparse.Namespace) -> dict:
         path=paths.calibration / "summary.json",
         attempts_path=attempts_path,
         config=config,
-        split=args.split,
+        split=split,
         start=start,
         stop=stop,
     )

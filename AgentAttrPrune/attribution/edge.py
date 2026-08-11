@@ -873,10 +873,10 @@ def compute_event_edge_scores(
 
 def trace_is_correct(trace: Mapping[str, Any]) -> bool:
     final = trace.get("final") or {}
+    if "correct" in final:
+        return bool(final["correct"])
     parsed = final.get("parsed_answer")
     gold = final.get("gold_answer")
-    if parsed is None and "correct" in final:
-        return bool(final["correct"])
     return str(parsed).strip().upper() == str(gold).strip().upper() and gold is not None
 
 

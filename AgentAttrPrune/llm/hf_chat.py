@@ -96,7 +96,7 @@ class HFChat(LLM):
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 torch_dtype="auto",
-                device_map="auto",
+                device_map="balanced",
                 trust_remote_code=True,
             )
             if self.tokenizer.pad_token_id is None:

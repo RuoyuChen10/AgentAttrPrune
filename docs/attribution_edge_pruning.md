@@ -11,7 +11,7 @@ the selected content into communication-edge importance.
 The current implementation has six goals:
 
 1. preserve a complete, readable attribution bundle for every worker-round
-   node and final reviewer in every selected MMLU dev sample;
+   node and final reviewer in every selected calibration sample;
 2. remove only incoming agent-output or temporal-history sentences while
    keeping fixed prompt content intact;
 3. recover the receiving node's complete recorded output score with an exact
@@ -29,14 +29,14 @@ Primary implementation modules:
   search, edge metrics, matrices, aggregation, and visualizations;
 - `AgentAttrPrune/graph/`, `tracing/`, and `pruning/`: shared dense/pruned graph
   execution, exact trace capture, and round-policy replay;
-- `experiments_attrprune/collect_correct.py`: dense MMLU dev traces;
+- `experiments_attrprune/collect_correct.py`: dense benchmark calibration traces;
 - `experiments_attrprune/attribute_edges.py`: per-node attribution, sample
   matrices, correct-only aggregation, and policy publication;
-- `experiments_attrprune/evaluate_mmlu.py`: complete dense/pruned evaluation.
+- `experiments_attrprune/evaluate_benchmark.py`: complete dense/pruned evaluation.
 
 ## 2. Data model and notation
 
-Let \(x\) be a recorded MMLU sample and \(e\) one receiving generation event.
+Let \(x\) be a recorded benchmark sample and \(e\) one receiving generation event.
 The event stores:
 
 - receiving agent \(b_e\) and target round \(r_e\);
@@ -67,7 +67,22 @@ Spatial and temporal matrices are always stored as separate
 
 ## 3. Dense graph and trace requirements
 
-The default graph contains five workers and two reasoning rounds:
+Every default graph contains two reasoning rounds, but the worker configuration
+is benchmark-specific:
+
+| Benchmark | Workers | Worker roles | Events | Worker edge candidates |
+|---|---:|---|---:|---:|
+| MMLU | 5 | Knowlegable Expert, Critic, Mathematician, Psychologist, Historian | 11 | 45 |
+| GSM8K | 4 | Math Solver, Mathematical Analyst, Programming Expert, Inspector | 9 | 28 |
+| HumanEval | 5 | Project Manager, Algorithm Designer, Programming Expert, Test Analyst, Bug Fixer | 11 | 45 |
+
+The counts and role order follow the corresponding AgentPrune defaults. The
+current runner uses the shared `AnalyzeAgent` execution interface and a
+task-aware dense reviewer for all three benchmarks. Graph execution,
+attribution, matrix construction, and pruning are shared; role prompts,
+correctness evaluators, dataset splits, and matrix sizes are not.
+
+The shared candidate topology is:
 
 - spatial candidates form an ordered same-round DAG;
 - round 0 contains no temporal edges;
@@ -81,8 +96,8 @@ For \(N\) workers and \(R\) rounds, a complete trace contains:
 NR+1
 \]
 
-generation events. The extra event is the final reviewer. The default
-configuration therefore requires 11 events per sample.
+generation events. The extra event is the final reviewer. MMLU and HumanEval
+therefore require 11 events per sample, while GSM8K requires 9.
 
 Schema-v1 traces record exact prompt and generated token IDs. The HF backend
 also records:
@@ -101,9 +116,10 @@ checked conservatively against their recorded `llm_call.max_tokens`.
 
 The formal protocol uses:
 
-- MMLU `dev` for dense traces and policy calibration;
-- MMLU `val` for complete evaluation after the policy is frozen;
-- MMLU `test` only for optional final reporting.
+- MMLU `dev` for calibration and `val` for frozen-policy evaluation;
+- GSM8K `train` for calibration and `test` for evaluation;
+- the fixed HumanEval `dev` partition for calibration and its disjoint `test`
+  partition for evaluation.
 
 Per-node attribution defaults to `sample_scope=all`, so incorrect dev samples
 still receive complete diagnostic artifacts. Before aggregation, correctness is
@@ -177,7 +193,7 @@ F=P\setminus\bigcup_{j=1}^{m}v_j.
 \(F\) contains:
 
 - system messages;
-- the MMLU question and answer options;
+- the benchmark task (including MMLU answer options when present);
 - source labels such as `Agent ... output is:`;
 - separators;
 - chat-template and generation-prompt tokens.
@@ -798,6 +814,26 @@ Equivalent stages:
 ./experiments_attrprune/run_mmlu.sh eval
 ./experiments_attrprune/run_mmlu.sh compare
 ```
+
+### 16.5 GSM8K and HumanEval
+
+The benchmark-specific root launchers use the complete calibration selections,
+two rounds, and a 2048-token per-node generation ceiling:
+
+```bash
+# Calibration, attribution reports, matrices, heatmaps, and policies only
+./run_full_gsm8k.sh calibrate
+./run_full_humaneval.sh calibrate
+
+# Also evaluate the frozen policies on the disjoint evaluation split
+./run_full_gsm8k.sh all
+./run_full_humaneval.sh all
+```
+
+GSM8K calibrates on all 7,473 train records and evaluates on 1,319 test
+records. AgentPrune's 161-record HumanEval file has no official train split, so
+AgentAttrPrune uses a fixed seed-888 partition of 80 calibration records and 81
+disjoint evaluation records.
 
 Cached-artifact stages:
 

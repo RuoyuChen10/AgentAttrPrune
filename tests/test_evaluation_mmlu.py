@@ -136,6 +136,8 @@ def make_args(run_dir: Path, *, mode="dense", save_traces=False, limit=3):
         results_root=None,
         run_name=None,
         mode=mode,
+        policy_json=None,
+        evaluation_name=None,
         split="val",
         start_index=0,
         limit=limit,
@@ -257,6 +259,31 @@ def test_dense_evaluation_writes_resolved_policy_and_optional_traces(
     assert trace["config"]["fingerprint"] == config["fingerprint"]
 
 
+def test_explicit_policy_and_evaluation_name_keep_sweep_outputs_separate(
+    monkeypatch, tmp_path
+):
+    run_dir, config = make_run(tmp_path)
+    default_policy = write_half_policy(run_dir, config, "token_ratio")
+    explicit_policy = run_dir / "attribution" / "static" / "prune_05pct.json"
+    explicit_policy.parent.mkdir(parents=True)
+    default_policy.replace(explicit_policy)
+    install_fakes(monkeypatch)
+    args = make_args(run_dir, mode="token_ratio", limit=1)
+    args.policy_json = explicit_policy
+    args.evaluation_name = "static_token_ratio_prune_05pct"
+
+    summary = asyncio.run(evaluate_mmlu.evaluate(args))
+
+    evaluation_dir = (
+        run_dir / "evaluation" / "static_token_ratio_prune_05pct_val"
+    )
+    assert summary["evaluation_name"] == "static_token_ratio_prune_05pct"
+    assert summary["evaluation_directory"] == evaluation_dir.name
+    assert summary["source_policy_json"] == str(explicit_policy)
+    assert (evaluation_dir / "evaluation_summary.json").is_file()
+    assert not (run_dir / "evaluation" / "token_ratio_val").exists()
+
+
 def test_evaluation_rejects_config_or_missing_policy_before_model_load(
     monkeypatch, tmp_path
 ):
@@ -333,3 +360,15 @@ def test_evaluation_cli_requires_a_named_mode():
         evaluate_mmlu.parse_args([])
     assert evaluate_mmlu.parse_args(["--mode", "word_ratio"]).mode == "word_ratio"
     assert evaluate_mmlu.parse_args(["--mode", "token_ratio"]).mode == "token_ratio"
+    parsed = evaluate_mmlu.parse_args(
+        [
+            "--mode",
+            "token_ratio",
+            "--policy-json",
+            "policy.json",
+            "--evaluation-name",
+            "static_prune_05pct",
+        ]
+    )
+    assert parsed.policy_json == Path("policy.json")
+    assert parsed.evaluation_name == "static_prune_05pct"

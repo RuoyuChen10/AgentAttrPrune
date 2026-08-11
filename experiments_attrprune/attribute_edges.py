@@ -1,4 +1,4 @@
-"""Calibrate round-specific edge policies from verified-correct MMLU traces."""
+"""Calibrate round-specific edge policies from verified-correct traces."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import argparse
 from pathlib import Path
 
 from AgentAttrPrune.attribution import AttributionConfig, EdgeAttributionCalibrator
+from AgentAttrPrune.datasets import BENCHMARKS
 from experiments_attrprune.common import (
-    DEFAULT_DATA_DIR,
     DEFAULT_MODEL,
     ExperimentPaths,
     canonical_model_name,
@@ -24,11 +24,12 @@ def parse_args() -> argparse.Namespace:
             "edge matrices, and publish token/binary/word-ratio policies."
         )
     )
+    parser.add_argument("--benchmark", choices=BENCHMARKS, default="mmlu")
     parser.add_argument("--model-name", default=str(DEFAULT_MODEL))
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=DEFAULT_DATA_DIR,
+        default=None,
         help="Accepted for a uniform shell interface; attribution reads saved traces.",
     )
     parser.add_argument("--run-dir", type=Path, default=None)
@@ -128,6 +129,7 @@ def main() -> None:
         seed=args.seed,
         results_root=args.results_root,
         run_name=args.run_name,
+        benchmark=args.benchmark,
     )
     paths = ExperimentPaths(run_dir)
     if not paths.run_config.exists():
@@ -138,6 +140,12 @@ def main() -> None:
     if run_config.get("fingerprint") != config_fingerprint(run_config):
         raise ValueError(
             "run_config.json has a missing or invalid fingerprint; refusing attribution."
+        )
+    if str(run_config.get("benchmark", "mmlu")) != args.benchmark:
+        raise ValueError(
+            "Attribution benchmark must match run_config.json exactly: "
+            f"configured={run_config.get('benchmark', 'mmlu')!r}, "
+            f"requested={args.benchmark!r}"
         )
     configured_model = canonical_model_name(run_config["model_name"])
     requested_model = canonical_model_name(args.model_name)

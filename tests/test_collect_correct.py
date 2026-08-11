@@ -33,6 +33,15 @@ class FakeDataset:
         return dict(record)
 
 
+class PreparingFakeDataset(FakeDataset):
+    constructions: list[tuple[str, bool]] = []
+
+    def __init__(self, *, split, data_dir, download):
+        assert split in {"dev", "val"}
+        assert Path(data_dir).is_dir()
+        type(self).constructions.append((split, download))
+
+
 class FakeResult:
     def __init__(self, answer):
         self.final_answer = answer
@@ -180,6 +189,28 @@ def test_collect_saves_every_trace_and_resume_skips_wrong_too(
         .read_text(encoding="utf-8")
         .splitlines()
     ) == 3
+
+
+def test_collect_prepares_both_splits_before_dataset_fingerprinting(
+    monkeypatch,
+    tmp_path,
+):
+    run_dir = tmp_path / "run"
+    data_dir = tmp_path / "mmlu"
+    _write_data(data_dir)
+    PreparingFakeDataset.constructions.clear()
+    FakeGraph.calls.clear()
+    monkeypatch.setattr(collect_correct, "MMLUDataset", PreparingFakeDataset)
+    monkeypatch.setattr(collect_correct, "HFChat", lambda name: {"model": name})
+    monkeypatch.setattr(collect_correct, "MultiAgentGraph", FakeGraph)
+    monkeypatch.setattr(collect_correct, "set_reproducible", lambda seed: None)
+    args = _args(run_dir, data_dir, resume=False)
+    args.no_download = False
+    args.limit = 1
+
+    asyncio.run(collect_correct.collect(args))
+
+    assert PreparingFakeDataset.constructions == [("dev", True), ("val", True)]
 
 
 def test_collect_saves_but_rejects_truncated_sample(
