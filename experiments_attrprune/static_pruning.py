@@ -36,12 +36,25 @@ def _validated_percentages(values: Sequence[int]) -> tuple[int, ...]:
     return percentages
 
 
-def _sweep_root(run_dir: Path, metric: str, statistic: str) -> Path:
+def _scope_suffix(pruning_scope: str) -> str:
+    if pruning_scope not in {"per_round_edge_type", "global"}:
+        raise ValueError(
+            "pruning_scope must be per_round_edge_type or global"
+        )
+    return "" if pruning_scope == "per_round_edge_type" else "_global"
+
+
+def _sweep_root(
+    run_dir: Path,
+    metric: str,
+    statistic: str,
+    pruning_scope: str,
+) -> Path:
     return (
         run_dir
         / "attribution"
         / "static_pruning"
-        / f"{metric}_{statistic}"
+        / f"{metric}_{statistic}{_scope_suffix(pruning_scope)}"
     )
 
 
@@ -49,8 +62,16 @@ def _policy_label(percentage: int) -> str:
     return f"prune_{percentage:02d}pct"
 
 
-def _evaluation_name(metric: str, statistic: str, percentage: int) -> str:
-    return f"static_{metric}_{statistic}_{_policy_label(percentage)}"
+def _evaluation_name(
+    metric: str,
+    statistic: str,
+    percentage: int,
+    pruning_scope: str,
+) -> str:
+    return (
+        f"static_{metric}_{statistic}{_scope_suffix(pruning_scope)}_"
+        f"{_policy_label(percentage)}"
+    )
 
 
 def _file_sha256(path: Path) -> str:
@@ -103,6 +124,7 @@ def build_static_sweep(
     metric: str = "token_ratio",
     statistic: str = "conditional_mean",
     unobserved: str = "keep",
+    pruning_scope: str = "per_round_edge_type",
     aggregate_json: str | Path | None = None,
 ) -> dict[str, Any]:
     """Create one immutable policy per requested pruning percentage."""
@@ -129,7 +151,7 @@ def build_static_sweep(
 
     split = str((run_config.get("splits") or {}).get("evaluation", "val"))
     aggregate_sha256 = _file_sha256(aggregate_path)
-    output_dir = _sweep_root(run_dir, metric, statistic)
+    output_dir = _sweep_root(run_dir, metric, statistic, pruning_scope)
     policy_dir = output_dir / "policies"
     entries: list[dict[str, Any]] = []
 
@@ -142,9 +164,15 @@ def build_static_sweep(
             threshold=None,
             pruning_rate=pruning_rate,
             unobserved=unobserved,
+            pruning_scope=pruning_scope,
         )
         label = _policy_label(percentage)
-        evaluation_name = _evaluation_name(metric, statistic, percentage)
+        evaluation_name = _evaluation_name(
+            metric,
+            statistic,
+            percentage,
+            pruning_scope,
+        )
         payload["static_sweep"] = {
             "label": label,
             "requested_pruning_percent": percentage,
@@ -199,7 +227,12 @@ def build_static_sweep(
         "metric": metric,
         "statistic": statistic,
         "unobserved": unobserved,
-        "pruning_scope": "observed_attributed_edges_per_round_edge_type",
+        "pruning_scope": (
+            "observed_attributed_edges_global"
+            if pruning_scope == "global"
+            else "observed_attributed_edges_per_round_edge_type"
+        ),
+        "pruning_allocation": pruning_scope,
         "evaluation_split": split,
         "percentages": list(percentages),
         "policies": entries,
@@ -296,10 +329,16 @@ def summarize_static_sweep(manifest_json: str | Path) -> dict[str, Any]:
     if not rows:
         raise ValueError("Sweep manifest contains no policies")
     split = manifest["evaluation_split"]
+    pruning_scope = str(
+        manifest.get("pruning_allocation", "per_round_edge_type")
+    )
     output_dir = (
         run_dir
         / "evaluation"
-        / f"static_{manifest['metric']}_{manifest['statistic']}_sweep_{split}"
+        / (
+            f"static_{manifest['metric']}_{manifest['statistic']}"
+            f"{_scope_suffix(pruning_scope)}_sweep_{split}"
+        )
     )
     summary = {
         "schema_version": 1,
@@ -309,6 +348,7 @@ def summarize_static_sweep(manifest_json: str | Path) -> dict[str, Any]:
         "metric": manifest["metric"],
         "statistic": manifest["statistic"],
         "pruning_scope": manifest["pruning_scope"],
+        "pruning_allocation": pruning_scope,
         "manifest_json": str(manifest_path),
         "selection": selection,
         "rows": rows,
@@ -348,6 +388,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="conditional_mean",
     )
     prepare.add_argument("--unobserved", choices=("keep", "drop"), default="keep")
+    prepare.add_argument(
+        "--pruning-scope",
+        choices=("per_round_edge_type", "global"),
+        default="per_round_edge_type",
+        help=(
+            "Allocate the requested pruning rate independently per matrix "
+            "(legacy behavior) or once across all spatial/temporal matrices."
+        ),
+    )
     prepare.add_argument("--aggregate-json", type=Path, default=None)
 
     summarize = subparsers.add_parser(
@@ -366,6 +415,7 @@ def main() -> None:
             metric=args.metric,
             statistic=args.statistic,
             unobserved=args.unobserved,
+            pruning_scope=args.pruning_scope,
             aggregate_json=args.aggregate_json,
         )
         print(f"Prepared {len(manifest['policies'])} policies")

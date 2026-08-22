@@ -75,6 +75,7 @@ else
     --start-index "${VAL_START_INDEX}" \
     --limit "${VAL_LIMIT}" \
     --seed 0 \
+    --resume \
     --no-download \
     2>&1 | tee "${DENSE_LOG}"
   dense_status=${PIPESTATUS[0]}
@@ -107,6 +108,7 @@ for percentage in "${PERCENTAGES[@]}"; do
     --start-index "${VAL_START_INDEX}" \
     --limit "${VAL_LIMIT}" \
     --seed 0 \
+    --resume \
     --no-download \
     2>&1 | tee "${pruning_log}"
   pruning_status=${PIPESTATUS[0]}

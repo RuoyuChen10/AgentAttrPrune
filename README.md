@@ -385,6 +385,37 @@ SALIENCY_FLOOR=0.4 ./experiments_attrprune/run_mmlu.sh render
 Use a new `RUN_NAME` whenever the model, data snapshot, worker configuration,
 round count, or generation settings change.
 
+### Static MMLU pruning-rate sweep
+
+After `aggregate_edge_matrices.json` has been generated, static policies can
+be built and evaluated at several pruning rates without rerunning attribution.
+The original allocation remains the default: it rounds and applies the
+requested rate independently to each round and each edge type
+(`spatial`/`temporal`).
+
+The optional global allocation instead flattens every observed spatial and
+temporal edge across all rounds, sorts them by importance, and applies one
+pruning budget to the whole set:
+
+```bash
+PRUNING_SCOPE=global \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+./run_static_mmlu_pruning_sweep.sh all 5 10 20 30 40 50
+```
+
+Generate only the global policy JSON files with:
+
+```bash
+PRUNING_SCOPE=global \
+./run_static_mmlu_pruning_sweep.sh prepare 5 10 20 30 40 50
+```
+
+Omit `PRUNING_SCOPE` or set it to `per_round_edge_type` to reproduce the old
+behavior. Global policies are written below
+`attribution/static_pruning/token_ratio_conditional_mean_global/`, and their
+evaluations use `_global`-suffixed names, so old policies, checkpoints, and
+summaries are not overwritten.
+
 ## Running GSM8K and HumanEval
 
 Download all missing files:
@@ -463,7 +494,7 @@ not a security boundary for hostile code.
 | `TARGET_RECOVERY` | `0.95` | Early-stop recovery threshold |
 | `SALIENCY_FLOOR` | `0.4` | Display-only selected-prefix floor |
 | `POLICY_PRUNING_RATE` | `0.25` | Per-round, per-edge-type pruning rate |
-| `RESUME` | `0` | Reuse completed trace attempts |
+| `RESUME` | `0` | Reuse completed trace attempts and validated evaluation checkpoints |
 | `OVERWRITE_ATTRIBUTION` | `0` | Recompute cached attribution events |
 | `KEEP_GOING` | `0` | Collect failures but still reject a partial policy |
 | `DRY_RUN` | `0` | Print commands without executing them |
@@ -504,6 +535,9 @@ results/AgentAttrPrune/<benchmark>/qwen3_8b/seed_<seed>/
 │       └── sample_token_ratio_matrices.png
 ├── evaluation/
 │   ├── dense_val/
+│   │   ├── evaluation_state.json
+│   │   ├── predictions.jsonl
+│   │   └── evaluation_summary.json
 │   ├── binary_val/
 │   └── token_ratio_val/
 ├── comparison_summary.json
@@ -517,6 +551,15 @@ match.
 
 Generated data is ignored by Git. See
 [results/AgentAttrPrune/README.md](results/AgentAttrPrune/README.md).
+
+During evaluation, `predictions.jsonl` is atomically rewritten and synced after
+each completed sample. A rerun with `--resume` validates
+`evaluation_state.json`, skips all completed sample indices (including wrong
+predictions), and evaluates only the missing indices. The final summary is not
+written until the requested selection is complete; accuracy and token/call
+totals are then recomputed from the full persisted record set. The evaluation
+identity includes the run fingerprint, exact policy hash, dataset range, seed,
+and trace mode, preventing accidental mixtures across configurations.
 
 ## Fair-comparison protocol
 

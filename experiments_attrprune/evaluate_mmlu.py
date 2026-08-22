@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -88,7 +89,39 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--split", default=None)
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--sample-index",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "Evaluate one exact dataset index. Repeat for a sparse selection. "
+            "When provided, this replaces the contiguous --start-index/--limit "
+            "selection."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume from validated per-sample predictions.jsonl checkpoints. "
+            "The run fingerprint, policy, dataset selection, seed, and trace mode "
+            "must match the original evaluation exactly."
+        ),
+    )
+    parser.add_argument(
+        "--defer-index",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "Temporarily defer one sample index during this invocation while "
+            "keeping it in the final evaluation selection. Repeat this option "
+            "for multiple indices. No final summary is written until every "
+            "deferred sample is completed by a later --resume run."
+        ),
+    )
     parser.add_argument(
         "--save-traces",
         action="store_true",
@@ -251,6 +284,155 @@ def _write_jsonl_atomic(path: Path, records: Sequence[Mapping[str, Any]]) -> Pat
     return path
 
 
+def _json_fingerprint(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _evaluation_state(
+    *,
+    config: Mapping[str, Any],
+    policy: RoundPolicy,
+    mode: str,
+    evaluation_name: str,
+    evaluation_directory: str,
+    benchmark: str,
+    split: str,
+    start: int,
+    stop: int,
+    dataset_size: int,
+    seed: int,
+    save_traces: bool,
+    sample_indices: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    state = {
+        "schema_version": 1,
+        "run_fingerprint": str(config["fingerprint"]),
+        "policy_fingerprint": _json_fingerprint(policy.to_dict()),
+        "mode": mode,
+        "evaluation_name": evaluation_name,
+        "evaluation_directory": evaluation_directory,
+        "benchmark": benchmark,
+        "split": split,
+        "start_index": start,
+        "stop_index_exclusive": stop,
+        "dataset_size": dataset_size,
+        "seed": seed,
+        "save_traces": save_traces,
+    }
+    if sample_indices is not None:
+        state["sample_indices"] = [int(index) for index in sample_indices]
+    return state
+
+
+def _ensure_evaluation_state(
+    path: Path,
+    expected: Mapping[str, Any],
+    *,
+    predictions_path: Path,
+) -> Path:
+    if path.is_file():
+        current = load_json(path)
+        if current != dict(expected):
+            differing = sorted(
+                key
+                for key in set(current) | set(expected)
+                if current.get(key) != expected.get(key)
+            )
+            raise ValueError(
+                f"Evaluation checkpoint identity mismatch at {path}; changed "
+                f"fields: {', '.join(differing)}. Choose another evaluation name "
+                "or remove the incompatible output directory."
+            )
+        return path
+    if predictions_path.is_file() and predictions_path.stat().st_size:
+        raise ValueError(
+            f"Cannot safely resume {predictions_path}: evaluation_state.json is "
+            "missing, so the checkpoint identity cannot be verified."
+        )
+    return write_json(path, dict(expected))
+
+
+def _load_prediction_checkpoints(
+    path: Path,
+    *,
+    start: int,
+    stop: int,
+    selected_indices: Sequence[int] | None = None,
+) -> dict[int, dict[str, Any]]:
+    if not path.is_file():
+        return {}
+    records: dict[int, dict[str, Any]] = {}
+    selected = (
+        {int(index) for index in selected_indices}
+        if selected_indices is not None
+        else None
+    )
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"Invalid JSON checkpoint at {path}:{line_number}"
+                ) from error
+            if not isinstance(record, Mapping):
+                raise ValueError(
+                    f"Checkpoint at {path}:{line_number} must be a JSON object"
+                )
+            if "sample_index" not in record:
+                raise ValueError(
+                    f"Checkpoint at {path}:{line_number} has no sample_index"
+                )
+            sample_index = int(record["sample_index"])
+            if not start <= sample_index < stop:
+                raise ValueError(
+                    f"Checkpoint sample {sample_index} is outside [{start}, {stop})"
+                )
+            if selected is not None and sample_index not in selected:
+                raise ValueError(
+                    f"Checkpoint sample {sample_index} is outside the exact "
+                    "sample-index selection"
+                )
+            if sample_index in records:
+                raise ValueError(
+                    f"Duplicate checkpoint for sample_index {sample_index} at {path}"
+                )
+            required = {
+                "gold_answer",
+                "parsed_answer",
+                "correct",
+                "output",
+                "metrics",
+                "edge_counts",
+            }
+            missing = sorted(required - set(record))
+            if missing:
+                raise ValueError(
+                    f"Checkpoint sample {sample_index} is missing: {', '.join(missing)}"
+                )
+            records[sample_index] = dict(record)
+    return records
+
+
+def _common_edge_counts(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    common: dict[str, Any] | None = None
+    for record in records:
+        edge_counts = _mapping(record.get("edge_counts"))
+        if common is None:
+            common = edge_counts
+        elif edge_counts != common:
+            raise ValueError("Evaluation checkpoints contain inconsistent edge counts")
+    return common or {}
+
+
 def _trace_final(result: Any, *, gold: str, parsed: str, correct: bool) -> dict:
     if hasattr(result, "to_trace_final"):
         final = dict(result.to_trace_final())
@@ -335,12 +517,29 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 f"{benchmark} data identity differs from run_config.json; refusing to "
                 "mix a different data directory or dataset snapshot into this run."
             )
-    if args.start_index >= len(dataset):
-        raise ValueError(
-            f"--start-index {args.start_index} is outside dataset size {len(dataset)}"
+    exact_sample_indices = list(getattr(args, "sample_index", None) or ())
+    if exact_sample_indices:
+        if len(exact_sample_indices) != len(set(exact_sample_indices)):
+            raise ValueError("--sample-index values must be unique")
+        invalid_indices = sorted(
+            index for index in exact_sample_indices if not 0 <= index < len(dataset)
         )
-    start = args.start_index
-    stop = min(len(dataset), start + limit)
+        if invalid_indices:
+            raise ValueError(
+                f"--sample-index values are outside dataset size {len(dataset)}: "
+                + ", ".join(str(index) for index in invalid_indices)
+            )
+        selected_indices = sorted(exact_sample_indices)
+        start = selected_indices[0]
+        stop = selected_indices[-1] + 1
+    else:
+        if args.start_index >= len(dataset):
+            raise ValueError(
+                f"--start-index {args.start_index} is outside dataset size {len(dataset)}"
+            )
+        start = args.start_index
+        stop = min(len(dataset), start + limit)
+        selected_indices = list(range(start, stop))
 
     evaluation_name = getattr(args, "evaluation_name", None)
     evaluation_dir_name = _evaluation_directory_name(
@@ -348,35 +547,96 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     )
     evaluation_dir = paths.evaluation / evaluation_dir_name
     evaluation_dir.mkdir(parents=True, exist_ok=True)
-    resolved_policy_path = policy.to_json(evaluation_dir / "resolved_policy.json")
+    resolved_policy_path = evaluation_dir / "resolved_policy.json"
+    predictions_path = evaluation_dir / "predictions.jsonl"
+    state_path = evaluation_dir / "evaluation_state.json"
+    resolved_evaluation_name = evaluation_name or args.mode
+    expected_state = _evaluation_state(
+        config=config,
+        policy=policy,
+        mode=args.mode,
+        evaluation_name=resolved_evaluation_name,
+        evaluation_directory=evaluation_dir_name,
+        benchmark=benchmark,
+        split=split,
+        start=start,
+        stop=stop,
+        dataset_size=len(dataset),
+        seed=int(args.seed),
+        save_traces=bool(args.save_traces),
+        sample_indices=selected_indices if exact_sample_indices else None,
+    )
+    _ensure_evaluation_state(
+        state_path,
+        expected_state,
+        predictions_path=predictions_path,
+    )
+    resolved_policy_path = policy.to_json(resolved_policy_path)
+    checkpoint_records = _load_prediction_checkpoints(
+        predictions_path,
+        start=start,
+        stop=stop,
+        selected_indices=selected_indices if exact_sample_indices else None,
+    )
+    resume = bool(getattr(args, "resume", False))
+    if checkpoint_records and not resume:
+        raise FileExistsError(
+            f"Evaluation checkpoints already exist at {predictions_path}. "
+            "Use --resume to skip completed samples or choose another "
+            "--evaluation-name."
+        )
+    resumed_samples = len(checkpoint_records)
+    if resumed_samples:
+        print(
+            f"Validated {resumed_samples}/{len(selected_indices)} completed checkpoints "
+            f"from {predictions_path}; resuming missing samples only."
+        )
+    deferred_indices = set(getattr(args, "defer_index", None) or ())
+    invalid_deferred = sorted(
+        sample_index
+        for sample_index in deferred_indices
+        if sample_index not in selected_indices
+    )
+    if invalid_deferred:
+        raise ValueError(
+            "--defer-index values are outside the evaluation selection: "
+            f"{invalid_deferred}"
+        )
+    deferred_pending = sorted(deferred_indices - set(checkpoint_records))
+    if deferred_pending:
+        print(
+            "Deferring sample indices for this invocation: "
+            + ", ".join(str(index) for index in deferred_pending)
+        )
+    pending_indices = [
+        sample_index
+        for sample_index in selected_indices
+        if sample_index not in checkpoint_records
+        and sample_index not in deferred_indices
+    ]
 
     decoding = config["decoding"]
-    llm = HFChat(hf_model_reference(config["model_name"]))
-    graph_kwargs = {
-        "num_rounds": int(config["num_rounds"]),
-        "policy": policy,
-        "temperature": float(decoding["temperature"]),
-        "max_new_tokens": int(decoding["max_new_tokens"]),
-    }
-    if benchmark != "mmlu":
-        graph_kwargs["prompt_set"] = definition.prompt_set
-    graph = MultiAgentGraph(
-        llm,
-        worker_specs_from_config(config),
-        **graph_kwargs,
-    )
-
-    records: list[dict[str, Any]] = []
-    correct_count = 0
-    llm_calls = 0
-    prompt_tokens = 0
-    generated_tokens = 0
-    graph_elapsed = 0.0
-    common_edge_counts: dict[str, Any] | None = None
-    started_at = time.perf_counter()
+    graph = None
+    if pending_indices:
+        llm = HFChat(hf_model_reference(config["model_name"]))
+        graph_kwargs = {
+            "num_rounds": int(config["num_rounds"]),
+            "policy": policy,
+            "temperature": float(decoding["temperature"]),
+            "max_new_tokens": int(decoding["max_new_tokens"]),
+        }
+        if benchmark != "mmlu":
+            graph_kwargs["prompt_set"] = definition.prompt_set
+        graph = MultiAgentGraph(
+            llm,
+            worker_specs_from_config(config),
+            **graph_kwargs,
+        )
 
     indices = tqdm(
-        range(start, stop),
+        pending_indices,
+        total=len(selected_indices),
+        initial=resumed_samples,
         desc=f"{args.mode} {benchmark} {split} evaluation",
     )
     for sample_index in indices:
@@ -400,6 +660,8 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 sample=sample,
             )
 
+        sample_started_at = time.perf_counter()
+        assert graph is not None
         result = await graph.run_sample(
             sample,
             recorder=recorder,
@@ -412,37 +674,79 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         is_correct = bool(outcome["correct"])
         metrics = _mapping(result.metrics)
         edge_counts = _mapping(result.edge_counts)
-        if common_edge_counts is None:
-            common_edge_counts = edge_counts
-        elif edge_counts != common_edge_counts:
+        existing_edge_counts = _common_edge_counts(
+            list(checkpoint_records.values())
+        )
+        if existing_edge_counts and edge_counts != existing_edge_counts:
             raise RuntimeError("Graph edge counts changed between evaluation samples")
 
         if recorder is not None:
             recorder.write(
                 _trace_final(result, gold=gold, parsed=parsed, correct=is_correct)
             )
-        correct_count += int(is_correct)
-        llm_calls += int(metrics.get("llm_calls", 0))
-        prompt_tokens += int(metrics.get("prompt_tokens", 0))
-        generated_tokens += int(metrics.get("generated_tokens", 0))
-        graph_elapsed += float(metrics.get("elapsed_seconds", 0.0))
-        records.append(
-            {
-                "sample_index": sample_index,
-                "subject": str(sample.get("subject", "")),
-                "task_id": str(sample.get("task_id", "")),
-                "gold_answer": gold,
-                "parsed_answer": parsed,
-                "correct": is_correct,
-                "output": str(result.final_answer),
-                "metrics": metrics,
-                "evaluation_details": outcome.get("details") or {},
-                "trace_json": str(trace_path) if recorder is not None else None,
-            }
+        checkpoint_records[sample_index] = {
+            "sample_index": sample_index,
+            "subject": str(sample.get("subject", "")),
+            "task_id": str(sample.get("task_id", "")),
+            "gold_answer": gold,
+            "parsed_answer": parsed,
+            "correct": is_correct,
+            "output": str(result.final_answer),
+            "metrics": metrics,
+            "edge_counts": edge_counts,
+            "sample_elapsed_seconds": time.perf_counter() - sample_started_at,
+            "evaluation_details": outcome.get("details") or {},
+            "trace_json": str(trace_path) if recorder is not None else None,
+        }
+        _write_jsonl_atomic(
+            predictions_path,
+            [checkpoint_records[index] for index in sorted(checkpoint_records)],
         )
 
-    elapsed = time.perf_counter() - started_at
-    edge_counts = common_edge_counts or {}
+    missing_indices = [
+        sample_index
+        for sample_index in selected_indices
+        if sample_index not in checkpoint_records
+    ]
+    if missing_indices:
+        raise RuntimeError(
+            "Evaluation checkpoint pass ended successfully, but the full selection "
+            "is still incomplete. Missing sample indices: "
+            + ", ".join(str(index) for index in missing_indices[:20])
+            + ". Rerun with --resume after removing the corresponding "
+            "--defer-index options; no final summary was written."
+        )
+
+    records = [checkpoint_records[index] for index in selected_indices]
+    # Recompute every aggregate from the complete persisted record set. This
+    # keeps resumed evaluations exact and independent of process boundaries.
+    correct_count = sum(int(bool(record["correct"])) for record in records)
+    llm_calls = sum(
+        int(_mapping(record.get("metrics")).get("llm_calls", 0))
+        for record in records
+    )
+    prompt_tokens = sum(
+        int(_mapping(record.get("metrics")).get("prompt_tokens", 0))
+        for record in records
+    )
+    generated_tokens = sum(
+        int(_mapping(record.get("metrics")).get("generated_tokens", 0))
+        for record in records
+    )
+    graph_elapsed = sum(
+        float(_mapping(record.get("metrics")).get("elapsed_seconds", 0.0))
+        for record in records
+    )
+    elapsed = sum(
+        float(
+            record.get(
+                "sample_elapsed_seconds",
+                _mapping(record.get("metrics")).get("elapsed_seconds", 0.0),
+            )
+        )
+        for record in records
+    )
+    edge_counts = _common_edge_counts(records)
     retained_edges = int(edge_counts.get("worker_active", 0))
     candidate_edges = int(edge_counts.get("worker_candidate", 0))
     edge_retention = float(
@@ -451,14 +755,12 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             retained_edges / candidate_edges if candidate_edges else 1.0,
         )
     )
-    predictions_path = _write_jsonl_atomic(
-        evaluation_dir / "predictions.jsonl", records
-    )
+    predictions_path = _write_jsonl_atomic(predictions_path, records)
     summary = {
         "schema_version": 1,
         "run_fingerprint": config["fingerprint"],
         "mode": args.mode,
-        "evaluation_name": evaluation_name or args.mode,
+        "evaluation_name": resolved_evaluation_name,
         "evaluation_directory": evaluation_dir_name,
         "benchmark": benchmark,
         "split": split,
@@ -480,9 +782,15 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "source_policy_json": str(source_policy) if source_policy else None,
         "resolved_policy_json": str(resolved_policy_path),
         "predictions_jsonl": str(predictions_path),
+        "evaluation_state_json": str(state_path),
+        "resumed": resume,
+        "resumed_samples": resumed_samples,
+        "checkpoint_interval_samples": 1,
         "traces_saved": bool(args.save_traces),
         "traces_dir": str(evaluation_dir / "traces") if args.save_traces else None,
     }
+    if exact_sample_indices:
+        summary["sample_indices"] = selected_indices
     summary_path = write_json(evaluation_dir / "evaluation_summary.json", summary)
     print(f"Saved {args.mode} evaluation summary to {summary_path}")
     return summary

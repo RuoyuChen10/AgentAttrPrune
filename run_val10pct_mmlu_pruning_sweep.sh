@@ -67,6 +67,7 @@ echo "Visible GPUs:        ${CUDA_VISIBLE_DEVICES}"
     --start-index "${VAL_START_INDEX}" \
     --limit "${VAL_LIMIT}" \
     --seed 0 \
+    --resume \
     --no-download
 
   # Build frozen policies, evaluate every requested rate, and write JSON/CSV.

@@ -93,6 +93,36 @@ def test_build_static_sweep_publishes_valid_rate_specific_policies(tmp_path):
     assert int(policy.temporal_masks.sum().item()) == 2
     assert policy.metadata["metric"] == "token_ratio"
     assert policy.metadata["pruning_rate"] == 0.5
+    assert policy.metadata["pruning_allocation"] == "per_round_edge_type"
+
+
+def test_global_static_sweep_allocates_one_budget_across_all_matrices(tmp_path):
+    run_dir, _ = _make_run(tmp_path)
+
+    manifest = build_static_sweep(
+        run_dir,
+        percentages=(50,),
+        pruning_scope="global",
+    )
+
+    entry = manifest["policies"][0]
+    assert entry["candidate_edges"] == 6
+    assert entry["pruned_edges"] == 3
+    assert entry["effective_candidate_pruning_rate"] == pytest.approx(0.5)
+    assert manifest["pruning_allocation"] == "global"
+    assert Path(manifest["manifest_json"]).parent.name.endswith("_global")
+    assert "_global_" in entry["evaluation_name"]
+
+    policy = RoundPolicy.from_json(entry["policy_json"])
+    # The three globally lowest values are temporal 0.1, spatial 0.2,
+    # and temporal 0.3. The strong spatial 0.8 edge is not forced out merely
+    # because it is the only edge in its round-specific matrix.
+    assert int(policy.spatial_masks.sum().item()) == 1
+    assert int(policy.temporal_masks.sum().item()) == 2
+    assert policy.spatial_masks[0, 0, 1]
+    assert not policy.spatial_masks[1, 0, 1]
+    assert policy.metadata["pruning_scope"] == "observed_attributed_edges_global"
+    assert policy.metadata["pruning_allocation"] == "global"
 
 
 def test_static_sweep_rejects_duplicate_percentages(tmp_path):

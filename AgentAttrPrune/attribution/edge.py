@@ -1200,8 +1200,17 @@ def build_pruned_masks(
     threshold: Optional[float] = None,
     pruning_rate: Optional[float] = 0.25,
     unobserved: str = "keep",
+    pruning_scope: str = "per_round_edge_type",
 ) -> Dict[str, Any]:
-    """Convert aggregate importance into deterministic round masks."""
+    """Convert aggregate importance into deterministic round masks.
+
+    ``per_round_edge_type`` preserves the original allocation rule: the
+    requested rate is rounded and applied independently to every round of
+    every edge type. ``global`` flattens all observed spatial and temporal
+    matrices and allocates the pruning budget once across the whole graph.
+    Threshold-based pruning is inherently global and is unchanged by this
+    option.
+    """
 
     if metric not in METRICS:
         raise ValueError(f"metric must be one of {METRICS}")
@@ -1211,6 +1220,10 @@ def build_pruned_masks(
         raise ValueError("Provide exactly one of threshold or pruning_rate")
     if unobserved not in {"keep", "drop"}:
         raise ValueError("unobserved must be keep or drop")
+    if pruning_scope not in {"per_round_edge_type", "global"}:
+        raise ValueError(
+            "pruning_scope must be per_round_edge_type or global"
+        )
     if threshold is not None and not math.isfinite(float(threshold)):
         raise ValueError("threshold must be finite")
     if pruning_rate is not None and (
@@ -1220,8 +1233,7 @@ def build_pruned_masks(
 
     agents = list(aggregate["agents"])
     expected_shape = (int(aggregate["num_rounds"]), len(agents), len(agents))
-    masks: Dict[str, Any] = {}
-    retained = {}
+    arrays: Dict[str, Dict[str, np.ndarray]] = {}
 
     def project_spatial_dag(
         requested: np.ndarray,
@@ -1296,9 +1308,57 @@ def build_pruned_masks(
         observed = opportunities > 0
         if bool((observed & ~candidates).any()):
             raise ValueError("Every observed edge must belong to candidate topology.")
-        if threshold is not None:
-            mask[observed] = importance[observed] >= float(threshold)
-        else:
+        arrays[edge_type] = {
+            "importance": importance,
+            "candidates": candidates,
+            "observed": observed,
+            "mask": mask,
+        }
+
+    if threshold is not None:
+        for edge_type in EDGE_TYPES:
+            edge_arrays = arrays[edge_type]
+            edge_arrays["mask"][edge_arrays["observed"]] = (
+                edge_arrays["importance"][edge_arrays["observed"]]
+                >= float(threshold)
+            )
+    elif pruning_scope == "global":
+        ranked_edges = []
+        for edge_type_index, edge_type in enumerate(EDGE_TYPES):
+            edge_arrays = arrays[edge_type]
+            edge_arrays["mask"][edge_arrays["observed"]] = True
+            for round_index, source, target in np.argwhere(
+                edge_arrays["observed"]
+            ).tolist():
+                ranked_edges.append(
+                    (
+                        float(
+                            edge_arrays["importance"][
+                                round_index, source, target
+                            ]
+                        ),
+                        edge_type_index,
+                        round_index,
+                        source,
+                        target,
+                        edge_type,
+                    )
+                )
+        prune_count = int(round(len(ranked_edges) * float(pruning_rate)))
+        if ranked_edges and pruning_rate > 0:
+            prune_count = max(1, prune_count)
+        prune_count = min(len(ranked_edges), prune_count)
+        ranked_edges.sort(key=lambda item: item[:5])
+        for _, _, round_index, source, target, edge_type in ranked_edges[
+            :prune_count
+        ]:
+            arrays[edge_type]["mask"][round_index, source, target] = False
+    else:
+        for edge_type in EDGE_TYPES:
+            edge_arrays = arrays[edge_type]
+            importance = edge_arrays["importance"]
+            observed = edge_arrays["observed"]
+            mask = edge_arrays["mask"]
             for round_index in range(importance.shape[0]):
                 positions = np.argwhere(observed[round_index])
                 mask[round_index][observed[round_index]] = True
@@ -1308,10 +1368,23 @@ def build_pruned_masks(
                 prune_count = min(len(positions), prune_count)
                 ranked = sorted(
                     positions.tolist(),
-                    key=lambda pos: (importance[round_index, pos[0], pos[1]], pos[0], pos[1]),
+                    key=lambda pos: (
+                        importance[round_index, pos[0], pos[1]],
+                        pos[0],
+                        pos[1],
+                    ),
                 )
                 for source, target in ranked[:prune_count]:
                     mask[round_index, source, target] = False
+
+    masks: Dict[str, Any] = {}
+    retained = {}
+    for edge_type in EDGE_TYPES:
+        edge_arrays = arrays[edge_type]
+        importance = edge_arrays["importance"]
+        candidates = edge_arrays["candidates"]
+        observed = edge_arrays["observed"]
+        mask = edge_arrays["mask"]
         if edge_type == "spatial":
             for round_index in range(mask.shape[0]):
                 np.fill_diagonal(mask[round_index], False)
@@ -1352,7 +1425,12 @@ def build_pruned_masks(
         "statistic": statistic,
         "threshold": threshold,
         "pruning_rate": pruning_rate,
-        "pruning_scope": "observed_attributed_edges_per_round_edge_type",
+        "pruning_scope": (
+            "observed_attributed_edges_global"
+            if pruning_scope == "global"
+            else "observed_attributed_edges_per_round_edge_type"
+        ),
+        "pruning_allocation": pruning_scope,
         "unobserved": unobserved,
         "masks": masks,
         "retention": retained,

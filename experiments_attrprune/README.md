@@ -110,6 +110,24 @@ effective global rate differ slightly from the requested rate. Both rates and
 the exact retained/pruned edge counts are recorded in the manifest and final
 summary.
 
+To allocate one pruning budget across every round and both edge types, select
+the global scope. All observed candidate edges are flattened, sorted by
+importance, and the globally lowest edges are removed. The legacy per-matrix
+scope remains the default, and global policies/results use `_global`-suffixed
+directories and evaluation names so the two sweeps can coexist:
+
+```bash
+PRUNING_SCOPE=global \
+  ./run_static_mmlu_pruning_sweep.sh all 10 20 30 40 50
+```
+
+To build only the global policy JSON files before launching evaluation:
+
+```bash
+PRUNING_SCOPE=global \
+  ./run_static_mmlu_pruning_sweep.sh prepare 10 20 30 40 50
+```
+
 Useful stages and checks:
 
 ```bash
@@ -130,6 +148,16 @@ The combined results are written under
 `evaluation/static_token_ratio_conditional_mean_sweep_val/summary.{json,csv}`
 inside the source run directory. Evaluation traces are disabled by default;
 set `SAVE_EVAL_TRACES=1` only when the additional disk use is intentional.
+
+Evaluations checkpoint `predictions.jsonl` atomically after every completed
+sample. Pass `--resume` (or set `RESUME=1` in the pipeline runners) to validate
+`evaluation_state.json` and skip every saved sample, whether its prediction was
+correct or incorrect. The state locks the run fingerprint, policy hash, dataset
+selection, seed, and trace mode, so incompatible checkpoints are never mixed.
+`evaluation_summary.json` is written only after the complete requested range is
+present and all totals and accuracy have been recomputed from the persisted
+records. The static-sweep and full-set MMLU launchers enable this evaluation
+resume mode automatically.
 
 Use an existing Conda environment:
 

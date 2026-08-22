@@ -19,8 +19,18 @@ SEED="${SEED:-0}"
 
 METRIC="${METRIC:-token_ratio}"
 STATISTIC="${STATISTIC:-conditional_mean}"
-PRUNING_PERCENTAGES="${PRUNING_PERCENTAGES:-5 10 20 30 40 50}"
-read -r -a PERCENTAGES <<< "${PRUNING_PERCENTAGES}"
+PRUNING_SCOPE="${PRUNING_SCOPE:-per_round_edge_type}"
+PRUNING_PERCENTAGES="${PRUNING_PERCENTAGES:-5 10 20 30 40 50 60 70 80}"
+
+STAGE="${1:-all}"
+if (( $# > 0 )); then
+  shift
+fi
+if (( $# > 0 )); then
+  PERCENTAGES=("$@")
+else
+  read -r -a PERCENTAGES <<< "${PRUNING_PERCENTAGES}"
+fi
 
 CONDA_BIN="${CONDA_BIN:-/egr/research-optml/ruoyu.chen/anaconda3/bin/conda}"
 CONDA_ENV="${CONDA_ENV:-agentprune}"
@@ -29,16 +39,20 @@ SAVE_EVAL_TRACES="${SAVE_EVAL_TRACES:-0}"
 SKIP_COMPLETED="${SKIP_COMPLETED:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 
-SWEEP_ROOT="${RUN_DIR}/attribution/static_pruning/${METRIC}_${STATISTIC}"
+SCOPE_SUFFIX=""
+if [[ "${PRUNING_SCOPE}" == "global" ]]; then
+  SCOPE_SUFFIX="_global"
+fi
+SWEEP_ROOT="${RUN_DIR}/attribution/static_pruning/${METRIC}_${STATISTIC}${SCOPE_SUFFIX}"
 MANIFEST_JSON="${SWEEP_ROOT}/manifest.json"
 
 usage() {
   cat <<'EOF'
 Usage:
-  ./run_static_mmlu_pruning_sweep.sh STAGE
+  ./run_static_mmlu_pruning_sweep.sh STAGE [PERCENTAGE ...]
 
 Stages:
-  prepare     Build frozen policies for 5, 10, 20, 30, 40 and 50 percent.
+  prepare     Build frozen policies for the selected percentages.
   eval        Evaluate every prepared policy on the MMLU validation selection.
   summarize   Validate all results and write one summary JSON and CSV.
   all         Prepare, evaluate and summarize (default).
@@ -47,17 +61,21 @@ Defaults:
   - source run: results/AgentAttrPrune/mmlu/qwen3_8b/full_dev_a6000x8_tok2048
   - importance: token_ratio conditional_mean
   - evaluation: all 1531 MMLU val records
-  - percentages: 5 10 20 30 40 50
+  - percentages: 5 10 20 30 40 50 60 70 80
 
 Useful overrides:
   CUDA_VISIBLE_DEVICES, RUN_DIR, MODEL_PATH, MMLU_DATA_DIR,
   VAL_START_INDEX, VAL_LIMIT, SEED, PRUNING_PERCENTAGES,
+  PRUNING_SCOPE=per_round_edge_type|global,
   SAVE_EVAL_TRACES=1, SKIP_COMPLETED=0, DRY_RUN=1.
 
 Examples:
   DRY_RUN=1 ./run_static_mmlu_pruning_sweep.sh all
+  PRUNING_SCOPE=global ./run_static_mmlu_pruning_sweep.sh all 10 20 30 40 50
+  ./run_static_mmlu_pruning_sweep.sh all 60 70 80
+  ./run_static_mmlu_pruning_sweep.sh eval 70
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-    ./run_static_mmlu_pruning_sweep.sh all
+    ./run_static_mmlu_pruning_sweep.sh all 60 70 80
 EOF
 }
 
@@ -90,11 +108,17 @@ percentage_label() {
 
 evaluation_name() {
   local percentage="$1"
-  printf 'static_%s_%s_%s' \
-    "${METRIC}" "${STATISTIC}" "$(percentage_label "${percentage}")"
+  printf 'static_%s_%s%s_%s' \
+    "${METRIC}" "${STATISTIC}" "${SCOPE_SUFFIX}" \
+    "$(percentage_label "${percentage}")"
 }
 
 preflight() {
+  if [[ "${PRUNING_SCOPE}" != "per_round_edge_type" \
+    && "${PRUNING_SCOPE}" != "global" ]]; then
+    echo "PRUNING_SCOPE must be per_round_edge_type or global." >&2
+    exit 2
+  fi
   if [[ ${#PERCENTAGES[@]} -eq 0 ]]; then
     echo "PRUNING_PERCENTAGES must contain at least one integer percentage." >&2
     exit 2
@@ -134,6 +158,7 @@ prepare_policies() {
     --run-dir "${RUN_DIR}" \
     --metric "${METRIC}" \
     --statistic "${STATISTIC}" \
+    --pruning-scope "${PRUNING_SCOPE}" \
     --percentages "${PERCENTAGES[@]}"
 }
 
@@ -168,6 +193,7 @@ evaluate_policies() {
       --start-index "${VAL_START_INDEX}"
       --limit "${VAL_LIMIT}"
       --seed "${SEED}"
+      --resume
       --no-download
     )
     if [[ -n "${MMLU_DATA_DIR}" ]]; then
@@ -189,7 +215,6 @@ summarize_results() {
     summarize --manifest "${MANIFEST_JSON}"
 }
 
-STAGE="${1:-all}"
 case "${STAGE}" in
   -h|--help|help)
     usage
@@ -208,6 +233,7 @@ echo "Stage:              ${STAGE}"
 echo "Source run:         ${RUN_DIR}"
 echo "Model:              ${MODEL_PATH}"
 echo "Importance:         ${METRIC}/${STATISTIC}"
+echo "Pruning scope:      ${PRUNING_SCOPE}"
 echo "Pruning percent:    ${PERCENTAGES[*]}"
 echo "Evaluation:         ${VAL_SPLIT}[${VAL_START_INDEX}:$((VAL_START_INDEX + VAL_LIMIT))]"
 echo "Visible GPUs:       ${CUDA_VISIBLE_DEVICES}"

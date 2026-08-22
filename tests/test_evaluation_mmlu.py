@@ -62,6 +62,8 @@ class FakeResult:
 
 class FakeGraph:
     instances = []
+    calls = []
+    fail_at = None
     answers = {0: "Decision: A", 1: "Decision: A", 2: "Decision: D"}
 
     def __init__(
@@ -102,6 +104,9 @@ class FakeGraph:
         self, sample, *, recorder, phase, sample_index
     ):
         assert phase == "evaluation"
+        type(self).calls.append(sample_index)
+        if sample_index == type(self).fail_at:
+            raise RuntimeError(f"forced failure at sample {sample_index}")
         return FakeResult(
             self.answers[sample_index],
             {
@@ -141,7 +146,9 @@ def make_args(run_dir: Path, *, mode="dense", save_traces=False, limit=3):
         split="val",
         start_index=0,
         limit=limit,
+        sample_index=[],
         seed=0,
+        resume=False,
         save_traces=save_traces,
         no_download=True,
     )
@@ -149,6 +156,8 @@ def make_args(run_dir: Path, *, mode="dense", save_traces=False, limit=3):
 
 def install_fakes(monkeypatch):
     FakeGraph.instances.clear()
+    FakeGraph.calls.clear()
+    FakeGraph.fail_at = None
     monkeypatch.setattr(evaluate_mmlu, "MMLUDataset", FakeDataset)
     monkeypatch.setattr(evaluate_mmlu, "HFChat", lambda name: {"model": name})
     monkeypatch.setattr(evaluate_mmlu, "MultiAgentGraph", FakeGraph)
@@ -216,6 +225,13 @@ def test_pruned_evaluation_covers_correct_and_incorrect_samples(monkeypatch, tmp
         .splitlines()
     ]
     assert [item["correct"] for item in prediction_records] == [True, False, True]
+    assert all("edge_counts" in item for item in prediction_records)
+    assert (
+        json.loads(
+            (evaluation_dir / "evaluation_state.json").read_text(encoding="utf-8")
+        )["run_fingerprint"]
+        == config["fingerprint"]
+    )
     resolved = RoundPolicy.from_json(evaluation_dir / "resolved_policy.json")
     assert resolved.spatial_masks.tolist() == RoundPolicy.from_json(
         source_policy
@@ -355,6 +371,102 @@ def test_evaluation_rejects_changed_mmlu_snapshot_before_writing_outputs(
     assert not (run_dir / "evaluation").exists()
 
 
+def test_evaluation_checkpoints_each_sample_and_resumes_exactly(
+    monkeypatch, tmp_path
+):
+    run_dir, _ = make_run(tmp_path)
+    install_fakes(monkeypatch)
+    args = make_args(run_dir, mode="dense")
+    args.resume = True
+    FakeGraph.fail_at = 1
+
+    with pytest.raises(RuntimeError, match="forced failure"):
+        asyncio.run(evaluate_mmlu.evaluate(args))
+
+    evaluation_dir = run_dir / "evaluation" / "dense_val"
+    predictions_path = evaluation_dir / "predictions.jsonl"
+    partial = [
+        json.loads(line)
+        for line in predictions_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["sample_index"] for item in partial] == [0]
+    assert not (evaluation_dir / "evaluation_summary.json").exists()
+
+    no_resume = make_args(run_dir, mode="dense")
+    with pytest.raises(FileExistsError, match="Use --resume"):
+        asyncio.run(evaluate_mmlu.evaluate(no_resume))
+
+    FakeGraph.calls.clear()
+    FakeGraph.fail_at = None
+    summary = asyncio.run(evaluate_mmlu.evaluate(args))
+
+    assert FakeGraph.calls == [1, 2]
+    assert summary["total"] == 3
+    assert summary["correct"] == 2
+    assert summary["accuracy"] == pytest.approx(2 / 3)
+    assert summary["llm_calls"] == 15
+    assert summary["resumed"] is True
+    assert summary["resumed_samples"] == 1
+    completed = [
+        json.loads(line)
+        for line in predictions_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["sample_index"] for item in completed] == [0, 1, 2]
+
+    monkeypatch.setattr(
+        evaluate_mmlu,
+        "HFChat",
+        lambda name: pytest.fail("a complete resumed evaluation must not load a model"),
+    )
+    FakeGraph.calls.clear()
+    repeated = asyncio.run(evaluate_mmlu.evaluate(args))
+    assert FakeGraph.calls == []
+    assert repeated["accuracy"] == pytest.approx(2 / 3)
+    assert repeated["resumed_samples"] == 3
+
+
+def test_evaluation_resume_rejects_changed_selection(monkeypatch, tmp_path):
+    run_dir, _ = make_run(tmp_path)
+    install_fakes(monkeypatch)
+    args = make_args(run_dir, mode="dense")
+    args.resume = True
+    FakeGraph.fail_at = 1
+    with pytest.raises(RuntimeError, match="forced failure"):
+        asyncio.run(evaluate_mmlu.evaluate(args))
+
+    changed = make_args(run_dir, mode="dense", limit=2)
+    changed.resume = True
+    with pytest.raises(ValueError, match="identity mismatch"):
+        asyncio.run(evaluate_mmlu.evaluate(changed))
+
+
+def test_evaluation_supports_sparse_exact_sample_indices(monkeypatch, tmp_path):
+    run_dir, _ = make_run(tmp_path)
+    install_fakes(monkeypatch)
+    args = make_args(run_dir, mode="dense")
+    args.sample_index = [2, 0]
+
+    summary = asyncio.run(evaluate_mmlu.evaluate(args))
+
+    assert FakeGraph.calls == [0, 2]
+    assert summary["sample_indices"] == [0, 2]
+    assert summary["total"] == 2
+    assert summary["correct"] == 2
+    state = json.loads(
+        (
+            run_dir / "evaluation" / "dense_val" / "evaluation_state.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert state["sample_indices"] == [0, 2]
+    predictions = [
+        json.loads(line)
+        for line in (
+            run_dir / "evaluation" / "dense_val" / "predictions.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["sample_index"] for record in predictions] == [0, 2]
+
+
 def test_evaluation_cli_requires_a_named_mode():
     with pytest.raises(SystemExit):
         evaluate_mmlu.parse_args([])
@@ -372,3 +484,7 @@ def test_evaluation_cli_requires_a_named_mode():
     )
     assert parsed.policy_json == Path("policy.json")
     assert parsed.evaluation_name == "static_prune_05pct"
+    assert evaluate_mmlu.parse_args(["--mode", "dense", "--resume"]).resume is True
+    assert evaluate_mmlu.parse_args(
+        ["--mode", "dense", "--sample-index", "19", "--sample-index", "67"]
+    ).sample_index == [19, 67]

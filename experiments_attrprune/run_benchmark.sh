@@ -227,6 +227,9 @@ run_evaluation() {
   if is_true "${SAVE_EVAL_TRACES}"; then
     args+=(--save-traces)
   fi
+  if is_true "${RESUME}"; then
+    args+=(--resume)
+  fi
   run_cmd "${PYTHON_CMD[@]}" "${args[@]}"
 }
 

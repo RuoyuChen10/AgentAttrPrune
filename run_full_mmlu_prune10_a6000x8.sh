@@ -43,9 +43,21 @@ export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
 export PYTHONUNBUFFERED=1
 
+DEFER_ARGS=()
+for sample_index in ${DEFER_INDICES:-}; do
+  if [[ ! "${sample_index}" =~ ^[0-9]+$ ]]; then
+    echo "Invalid DEFER_INDICES value: ${sample_index}" >&2
+    exit 1
+  fi
+  DEFER_ARGS+=(--defer-index "${sample_index}")
+done
+
 echo "Starting 10% full-set MMLU evaluation in the foreground."
 echo "GPUs: ${CUDA_VISIBLE_DEVICES}"
 echo "Log: ${LOG_FILE}"
+if (( ${#DEFER_ARGS[@]} )); then
+  echo "Deferred sample indices: ${DEFER_INDICES}"
+fi
 
 "${CONDA_BIN}" run --no-capture-output -n "${CONDA_ENV}" \
   python -m experiments_attrprune.evaluate_mmlu \
@@ -59,6 +71,8 @@ echo "Log: ${LOG_FILE}"
   --start-index 0 \
   --limit 1531 \
   --seed 0 \
+  --resume \
+  "${DEFER_ARGS[@]}" \
   --no-download \
   2>&1 | tee "${LOG_FILE}"
 
