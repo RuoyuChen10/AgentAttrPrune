@@ -1097,25 +1097,40 @@ def build_sample_matrices(
     }
 
 
-def aggregate_sample_matrices(sample_matrices: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+def aggregate_sample_matrices(
+    sample_matrices: Sequence[Mapping[str, Any]],
+    *,
+    aggregation_scope: str = "correct",
+) -> Dict[str, Any]:
+    """Aggregate observed edge scores under an explicit sample inclusion rule.
+
+    An observed zero contributes to the denominator just like any other score.
+    The original final-correct-only behavior remains the default.
+    """
+
+    if aggregation_scope not in {"correct", "all"}:
+        raise ValueError("aggregation_scope must be correct or all")
     if not sample_matrices:
         raise ValueError("No sample matrices were provided for aggregation.")
-    verified = [item for item in sample_matrices if item.get("correct_verified")]
-    if not verified:
+    included = [
+        item for item in sample_matrices
+        if aggregation_scope == "all" or item.get("correct_verified")
+    ]
+    if not included:
         raise ValueError("No verified-correct sample matrices were provided.")
-    agents = list(verified[0]["agents"])
-    agent_roles = list(verified[0].get("agent_roles", [""] * len(agents)))
-    agent_types = list(verified[0].get("agent_types", [""] * len(agents)))
+    agents = list(included[0]["agents"])
+    agent_roles = list(included[0].get("agent_roles", [""] * len(agents)))
+    agent_types = list(included[0].get("agent_types", [""] * len(agents)))
     attribution_configuration = dict(
-        verified[0].get("attribution_configuration") or {}
+        included[0].get("attribution_configuration") or {}
     )
     selection_configuration = dict(
-        verified[0].get("selection_configuration") or {}
+        included[0].get("selection_configuration") or {}
     )
-    num_rounds = int(verified[0]["num_rounds"])
-    trace_schema_version = verified[0].get("trace_schema_version", "legacy")
-    run_fingerprint = verified[0].get("run_fingerprint")
-    for item in verified[1:]:
+    num_rounds = int(included[0]["num_rounds"])
+    trace_schema_version = included[0].get("trace_schema_version", "legacy")
+    run_fingerprint = included[0].get("run_fingerprint")
+    for item in included[1:]:
         if list(item["agents"]) != agents or int(item["num_rounds"]) != num_rounds:
             raise ValueError("All sample matrices must use the same agent order and rounds.")
         item_roles = list(item.get("agent_roles", [""] * len(agents)))
@@ -1145,7 +1160,9 @@ def aggregate_sample_matrices(sample_matrices: Sequence[Mapping[str, Any]]) -> D
         "schema_version": 1,
         "trace_schema_version": trace_schema_version,
         "run_fingerprint": run_fingerprint,
-        "num_correct_samples": len(verified),
+        "aggregation_scope": aggregation_scope,
+        "num_aggregated_samples": len(included),
+        "num_correct_samples": sum(bool(item.get("correct_verified")) for item in included),
         "agents": agents,
         "agent_roles": agent_roles,
         "agent_types": agent_types,
@@ -1159,10 +1176,10 @@ def aggregate_sample_matrices(sample_matrices: Sequence[Mapping[str, Any]]) -> D
         aggregate["metrics"][metric] = {}
         for edge_type in EDGE_TYPES:
             values = np.asarray(
-                [item["matrices"][metric][edge_type] for item in verified], dtype=np.float64
+                [item["matrices"][metric][edge_type] for item in included], dtype=np.float64
             )
             opportunities = np.asarray(
-                [item["matrices"]["opportunity"][edge_type] for item in verified],
+                [item["matrices"]["opportunity"][edge_type] for item in included],
                 dtype=np.float64,
             )
             candidates = np.asarray(
@@ -1170,7 +1187,7 @@ def aggregate_sample_matrices(sample_matrices: Sequence[Mapping[str, Any]]) -> D
                     item["matrices"].get("candidate", item["matrices"]["opportunity"])[
                         edge_type
                     ]
-                    for item in verified
+                    for item in included
                 ],
                 dtype=np.float64,
             )
@@ -1415,6 +1432,13 @@ def build_pruned_masks(
         "run_fingerprint": aggregate.get("run_fingerprint"),
         "calibration_num_correct_samples": int(
             aggregate.get("num_correct_samples", 0)
+        ),
+        "calibration_num_aggregated_samples": int(
+            aggregate.get("num_aggregated_samples", aggregate.get("num_correct_samples", 0))
+        ),
+        "calibration_aggregation_scope": str(aggregate.get("aggregation_scope", "correct")),
+        "calibration_attribution_mode": str(
+            (aggregate.get("attribution_configuration") or {}).get("attribution_mode", "original")
         ),
         "agents": agents,
         "agent_roles": list(aggregate.get("agent_roles", [""] * len(agents))),

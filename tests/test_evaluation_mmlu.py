@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 from AgentAttrPrune.pruning import RoundPolicy
 from experiments_attrprune.common import (
     build_run_config,
+    config_fingerprint,
     mmlu_data_identity,
     write_json,
 )
@@ -74,6 +76,7 @@ class FakeGraph:
         policy,
         temperature,
         max_new_tokens,
+        reviewer_agent_ids=None,
     ):
         self.llm = llm
         self.worker_specs = list(worker_specs)
@@ -81,6 +84,7 @@ class FakeGraph:
         self.policy = policy
         self.temperature = temperature
         self.max_new_tokens = max_new_tokens
+        self.reviewer_agent_ids = dict(reviewer_agent_ids or {})
         type(self).instances.append(self)
 
         count = len(self.worker_specs)
@@ -213,6 +217,9 @@ def test_pruned_evaluation_covers_correct_and_incorrect_samples(monkeypatch, tmp
     assert summary["edge_retention"] == pytest.approx(0.5)
     assert summary["source_policy_json"] == str(source_policy)
     assert summary["run_fingerprint"] == config["fingerprint"]
+    assert FakeGraph.instances[0].reviewer_agent_ids == config["prompt"][
+        "reviewer_agent_ids"
+    ]
 
     evaluation_dir = run_dir / "evaluation" / "binary_val"
     assert json.loads(
@@ -472,6 +479,10 @@ def test_evaluation_cli_requires_a_named_mode():
         evaluate_mmlu.parse_args([])
     assert evaluate_mmlu.parse_args(["--mode", "word_ratio"]).mode == "word_ratio"
     assert evaluate_mmlu.parse_args(["--mode", "token_ratio"]).mode == "token_ratio"
+    assert evaluate_mmlu.parse_args(["--mode", "dense"]).eval_batch_size == 1
+    assert evaluate_mmlu.parse_args(
+        ["--mode", "dense", "--eval-batch-size", "4"]
+    ).eval_batch_size == 4
     parsed = evaluate_mmlu.parse_args(
         [
             "--mode",
@@ -488,3 +499,244 @@ def test_evaluation_cli_requires_a_named_mode():
     assert evaluate_mmlu.parse_args(
         ["--mode", "dense", "--sample-index", "19", "--sample-index", "67"]
     ).sample_index == [19, 67]
+
+
+class BatchingFakeLLM:
+    def __init__(self):
+        self.batch_sizes = []
+        self.closed = False
+
+    @asynccontextmanager
+    async def async_batching(self, batch_size):
+        self.batch_sizes.append(batch_size)
+        try:
+            yield
+        finally:
+            self.closed = True
+
+
+def read_predictions(run_dir, name="dense"):
+    return [
+        json.loads(line)
+        for line in (run_dir / "evaluation" / f"{name}_val" / "predictions.jsonl")
+        .read_text(encoding="utf-8").splitlines()
+    ]
+
+
+@pytest.mark.parametrize("mode", ["dense", "binary"])
+def test_batched_evaluation_preserves_results_and_bounds_concurrency(
+    monkeypatch, tmp_path, mode
+):
+    run_dir, config = make_run(tmp_path)
+    if mode == "binary":
+        write_half_policy(run_dir, config, mode)
+    install_fakes(monkeypatch)
+    args = make_args(run_dir, mode=mode, save_traces=True)
+    serial = asyncio.run(evaluate_mmlu.evaluate(args))
+    serial_records = read_predictions(run_dir, mode)
+    seeds = []
+    monkeypatch.setattr(evaluate_mmlu, "set_reproducible", seeds.append)
+    backend = BatchingFakeLLM()
+    monkeypatch.setattr(evaluate_mmlu, "HFChat", lambda name: backend)
+    completed = []
+
+    class DelayedGraph(FakeGraph):
+        active = 0
+        peak = 0
+
+        async def run_sample(self, sample, **kwargs):
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0.01 * (3 - kwargs["sample_index"]))
+                result = await super().run_sample(sample, **kwargs)
+                completed.append(kwargs["sample_index"])
+                return result
+            finally:
+                self.active -= 1
+
+    monkeypatch.setattr(evaluate_mmlu, "MultiAgentGraph", DelayedGraph)
+    args.evaluation_name = "batched"
+    args.eval_batch_size = 2
+    batched = asyncio.run(evaluate_mmlu.evaluate(args))
+    assert completed == [1, 0, 2]
+    assert FakeGraph.instances[-1].peak == 2
+    assert backend.batch_sizes == [2]
+    assert backend.closed
+    assert seeds == [0]  # No global reseeding while another sample is generating.
+    for key in ("accuracy", "llm_calls", "prompt_tokens", "generated_tokens", "edge_counts"):
+        assert batched[key] == serial[key]
+    assert batched["elapsed_seconds"] < batched["sample_elapsed_seconds_sum"]
+    parallel_records = read_predictions(run_dir, "batched")
+    assert [record["sample_index"] for record in parallel_records] == [0, 1, 2]
+    for expected, actual in zip(serial_records, parallel_records):
+        for key in ("output", "parsed_answer", "correct", "metrics", "edge_counts"):
+            assert actual[key] == expected[key]
+        trace = json.loads(Path(actual["trace_json"]).read_text())
+        assert trace["config"]["sample_index"] == actual["sample_index"]
+
+
+def test_batched_failure_checkpoints_completed_samples_and_cancels_rest(
+    monkeypatch, tmp_path
+):
+    run_dir, _ = make_run(tmp_path)
+    install_fakes(monkeypatch)
+    backend = BatchingFakeLLM()
+    monkeypatch.setattr(evaluate_mmlu, "HFChat", lambda name: backend)
+    cancelled = []
+
+    class FailingGraph(FakeGraph):
+        async def run_sample(self, sample, **kwargs):
+            index = kwargs["sample_index"]
+            try:
+                if index == 2:
+                    await asyncio.Event().wait()
+                if index == 1:
+                    await asyncio.sleep(0.02)
+                    raise RuntimeError("concurrent failure")
+                return await super().run_sample(sample, **kwargs)
+            except asyncio.CancelledError:
+                cancelled.append(index)
+                raise
+
+    monkeypatch.setattr(evaluate_mmlu, "MultiAgentGraph", FailingGraph)
+    args = make_args(run_dir)
+    args.eval_batch_size = 3
+    args.resume = True
+    with pytest.raises(RuntimeError, match="concurrent failure"):
+        asyncio.run(evaluate_mmlu.evaluate(args))
+    assert backend.closed
+    assert cancelled == [2]
+    assert [record["sample_index"] for record in read_predictions(run_dir)] == [0]
+    assert not (run_dir / "evaluation/dense_val/evaluation_summary.json").exists()
+
+    monkeypatch.setattr(evaluate_mmlu, "MultiAgentGraph", FakeGraph)
+    FakeGraph.calls.clear()
+    summary = asyncio.run(evaluate_mmlu.evaluate(args))
+    assert FakeGraph.calls == [1, 2]
+    assert summary["resumed_samples"] == 1
+    assert summary["total"] == 3
+    monkeypatch.setattr(
+        evaluate_mmlu, "HFChat",
+        lambda name: pytest.fail("completed resume must not load model"),
+    )
+    assert asyncio.run(evaluate_mmlu.evaluate(args))["resumed_samples"] == 3
+
+
+def test_batching_rejects_sampling_and_invalid_batch_size_before_writes(
+    monkeypatch, tmp_path
+):
+    run_dir, config = make_run(tmp_path)
+    install_fakes(monkeypatch)
+    args = make_args(run_dir)
+    args.eval_batch_size = 0
+    with pytest.raises(ValueError, match="must be positive"):
+        asyncio.run(evaluate_mmlu.evaluate(args))
+    config["decoding"]["temperature"] = 0.7
+    config["fingerprint"] = config_fingerprint(config)
+    write_json(run_dir / "run_config.json", config)
+    args.eval_batch_size = 2
+    with pytest.raises(ValueError, match="requires temperature=0"):
+        asyncio.run(evaluate_mmlu.evaluate(args))
+    assert FakeGraph.instances == []
+    assert not (run_dir / "evaluation").exists()
+
+
+def test_resume_aggregates_batch_provenance_without_inventing_legacy_metadata(
+    monkeypatch, tmp_path
+):
+    run_dir, _ = make_run(tmp_path)
+    install_fakes(monkeypatch)
+    backend = BatchingFakeLLM()
+    monkeypatch.setattr(evaluate_mmlu, "HFChat", lambda name: backend)
+    args = make_args(run_dir)
+    args.eval_batch_size = 4
+    legacy_summary = asyncio.run(evaluate_mmlu.evaluate(args))
+
+    assert legacy_summary["generation_batching"] == {
+        "configured_max_batch_size": 4,
+        "recorded_samples": 0,
+        "samples_without_batch_metadata": 3,
+        "recorded_calls": 0,
+        "oom_fallback_samples": 0,
+        "oom_fallback_calls": 0,
+        "max_oom_split_depth": 0,
+    }
+
+    evaluation_dir = run_dir / "evaluation" / "dense_val"
+    predictions_path = evaluation_dir / "predictions.jsonl"
+    legacy_record = read_predictions(run_dir)[0]
+    predictions_path.write_text(json.dumps(legacy_record) + "\n", encoding="utf-8")
+    (evaluation_dir / "evaluation_summary.json").unlink()
+
+    class MetadataGraph(FakeGraph):
+        async def run_sample(self, sample, **kwargs):
+            result = await super().run_sample(sample, **kwargs)
+            result.metrics.update(
+                {
+                    1: {
+                        "batch_metadata_calls": 5,
+                        "oom_fallback_calls": 2,
+                        "oom_max_split_depth": 2,
+                    },
+                    2: {
+                        "batch_metadata_calls": 3,
+                        "oom_fallback_calls": 0,
+                        "oom_max_split_depth": 0,
+                    },
+                }[kwargs["sample_index"]]
+            )
+            return result
+
+    monkeypatch.setattr(evaluate_mmlu, "MultiAgentGraph", MetadataGraph)
+    FakeGraph.calls.clear()
+    args.resume = True
+    summary = asyncio.run(evaluate_mmlu.evaluate(args))
+
+    assert FakeGraph.calls == [1, 2]
+    assert summary["total"] == 3
+    assert summary["llm_calls"] == 15
+    assert summary["generation_batching"] == {
+        "configured_max_batch_size": 4,
+        "recorded_samples": 2,
+        "samples_without_batch_metadata": 1,
+        "recorded_calls": 8,
+        "oom_fallback_samples": 1,
+        "oom_fallback_calls": 2,
+        "max_oom_split_depth": 2,
+    }
+    assert read_predictions(run_dir)[0] == legacy_record
+    saved_summary = json.loads((evaluation_dir / "evaluation_summary.json").read_text())
+    assert saved_summary["generation_batching"] == summary["generation_batching"]
+
+    monkeypatch.setattr(
+        evaluate_mmlu,
+        "HFChat",
+        lambda name: pytest.fail("completed resume must not load model"),
+    )
+    FakeGraph.calls.clear()
+    repeated = asyncio.run(evaluate_mmlu.evaluate(args))
+    assert FakeGraph.calls == []
+    assert repeated["generation_batching"] == summary["generation_batching"]
+    assert repeated["resumed_samples"] == 3
+
+
+def test_resume_supports_legacy_serial_state_but_rejects_new_batch_size(
+    monkeypatch, tmp_path
+):
+    run_dir, _ = make_run(tmp_path)
+    install_fakes(monkeypatch)
+    seeds = []
+    monkeypatch.setattr(evaluate_mmlu, "set_reproducible", seeds.append)
+    args = make_args(run_dir)
+    asyncio.run(evaluate_mmlu.evaluate(args))
+    assert seeds == [0, 0, 1, 2]
+    state_path = run_dir / "evaluation/dense_val/evaluation_state.json"
+    state = json.loads(state_path.read_text())
+    del state["eval_batch_size"]
+    write_json(state_path, state)
+    args.resume = True
+    assert asyncio.run(evaluate_mmlu.evaluate(args))["total"] == 3
+    args.eval_batch_size = 2
+    with pytest.raises(ValueError, match="eval_batch_size"):
+        asyncio.run(evaluate_mmlu.evaluate(args))

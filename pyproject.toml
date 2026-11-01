@@ -17,6 +17,7 @@ dependencies = [
   "matplotlib>=3.7",
   "tqdm>=4.66",
   "requests>=2.31",
+  "shortuuid>=1.0.13",
 ]
 
 [project.optional-dependencies]

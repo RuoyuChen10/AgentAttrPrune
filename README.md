@@ -1,604 +1,450 @@
 # AgentAttrPrune
 
-AgentAttrPrune is a compact, standalone repository for attribution-based
-communication pruning in multi-agent systems. It records dense multi-agent
-traces, identifies the incoming agent-output sentences that are sufficient to
-recover each receiving node's original output score, and aggregates those
-sentence selections into round-specific edge-importance matrices and
-deterministic pruning policies.
+Sentence-attribution-based communication pruning for local LLM multi-agent systems.
+AgentAttrPrune records complete reasoning traces, measures which incoming messages
+support each receiving agent, and converts those measurements into round-specific
+communication policies. It supports MMLU, GSM8K, and HumanEval with a local
+Hugging Face backend.
 
-The current release focuses on local Hugging Face/Qwen3 inference,
-sentence-level edge attribution, and three text benchmarks: MMLU, GSM8K, and
-HumanEval. It does not include AgentPrune's trainable edge optimizer, hosted
-model APIs, visual tasks, tool use, or AutoGen.
+The repository includes fixed-order pruning, correctness-aware attribution,
+random-order calibration, per-inference edge sampling, attribution-based agent
+ordering, and independent calibration-set resampling. Experiment outputs are
+kept separate from source code and are not distributed with the repository.
 
-See [the attribution and edge-pruning specification](docs/attribution_edge_pruning.md)
-for the full algorithm, matrix orientation, schemas, and interpretation
-boundaries.
+## Documentation
 
-## Repository layout
-
-```text
-AgentAttrPrune/
-├── AgentAttrPrune/             # Graph, HF backend, tracing, attribution, policy
-├── experiments_attrprune/      # Benchmark calibration, evaluation, and shell entrypoints
-├── docs/                       # Algorithm and output-schema documentation
-├── baselines/                  # Contract for future external baselines
-├── data/                       # Local datasets; contents are ignored by Git
-├── results/AgentAttrPrune/     # Generated experiment artifacts; ignored by Git
-├── tests/
-├── run_full_*.sh              # Complete MMLU, GSM8K, and HumanEval launchers
-└── pyproject.toml
-```
-
-Reusable implementation code belongs in the `AgentAttrPrune` package.
-`experiments_attrprune` only handles argument parsing, dataset iteration, run
-configuration, and artifact paths.
-
-## Current implementation
-
-### Dense graph and trace collection
-
-The benchmark configurations are intentionally task-specific. Their default
-worker counts and role order match the corresponding AgentPrune experiment and
-prompt-set defaults:
-
-| Benchmark | Calibration / evaluation | Workers | Roles in matrix order | Events at 2 rounds | Worker candidate edges |
-|---|---|---:|---|---:|---:|
-| MMLU | `dev` / `val` | 5 | Knowlegable Expert; Critic; Mathematician; Psychologist; Historian | 11 | 45 |
-| GSM8K | `train` / `test` | 4 | Math Solver; Mathematical Analyst; Programming Expert; Inspector | 9 | 28 |
-| HumanEval | fixed `dev` / disjoint `test` | 5 | Project Manager; Algorithm Designer; Programming Expert; Test Analyst; Bug Fixer | 11 | 45 |
-
-They are therefore not the same multi-agent system in worker count or roles.
-They do share one graph executor, two-round topology, trace schema, attribution
-search, matrix definition, pruning logic, and evaluation path. The original
-AgentPrune entrypoints name the worker implementations `AnalyzeAgent`,
-`MathSolver`, and `CodeWriting`, respectively. AgentAttrPrune standardizes their
-execution through `AnalyzeAgent` while preserving the benchmark-specific roles
-and prompts, followed by one task-aware dense reviewer. A policy is bound to its
-benchmark, worker order, roles, dataset snapshot, and run fingerprint; it cannot
-be applied to another benchmark accidentally.
-
-- Within each round, spatial communication is an executable ordered DAG:
-  earlier workers send to later workers.
-- Round 0 has no temporal edges.
-- From round 1 onward, temporal communication is a complete previous-round to
-  current-round `N x N` topology, including self-temporal edges.
-- A final dense reviewer reads all workers from the last round.
-
-For five workers and two rounds, every sample must contain:
-
-```text
-5 workers x 2 rounds + 1 reviewer = 11 generation events
-```
-
-`GenerationTraceRecorder` stores the exact input messages, rendered prompt,
-prompt token IDs, output text, generated token IDs, incoming-edge provenance,
-and generation termination metadata for every event. Outputs that reach
-`max_new_tokens` without EOS are marked as truncated. The diagnostic trace is
-retained, but truncated samples are rejected from formal attribution and policy
-calibration.
-
-### Attribution scope
-
-Every worker-round node and the final reviewer receive a standalone attribution
-record. Only sentences inside incoming agent outputs or temporal history are
-removable. The following content always remains visible:
-
-- system prompts;
-- the benchmark task (including MMLU answer options when present);
-- message headers and source labels;
-- separators and chat-template tokens.
-
-A node with no incoming agent/history content still receives complete JSON,
-HTML, and SVG artifacts with status `no_attributable_input`.
-
-### Teacher-forced target score
-
-The default attribution target is the receiving node's complete recorded output.
-The scorer teacher-forces the original generated token IDs under every
-perturbed prompt and computes:
-
-```text
-score_type      = logit
-score_reduction = sum
-target_mode     = all
-```
-
-The baseline prompt contains no incoming sentences. The full prompt contains
-all incoming sentences. Hidden sentence tokens are actually removed and the
-remaining prompt is compacted; they are not replaced by pad or EOS tokens.
-
-### Exact greedy sentence search and early stopping
-
-At every search step, the implementation evaluates **all remaining candidate
-sentences** and adds the sentence whose resulting score is closest to the full
-input score. Candidate variants are split into inference batches only to control
-memory usage.
-
-The older efficient-attribution controls `search_scope`, `pending_samples`, and
-`update_step` are intentionally **not implemented** in the current search.
-`ATTR_BATCH_SIZE` is a compute batch size, not a search window.
-
-Let:
-
-```text
-s0 = score with no incoming sentences
-s* = score with all incoming sentences
-sk = score after greedy step k
-```
-
-Recovery is:
-
-```text
-recovery_k = clip(1 - abs(sk - s*) / max(abs(s* - s0), 1e-12), 0, 1)
-```
-
-Search stops when recovery reaches `0.95`, or when the absolute score tolerance
-is satisfied. `patience=1` is the current default. If a larger patience value is
-used directly through the Python CLI, consecutive qualifying steps validate
-the stop, but the returned subset remains the earliest qualifying prefix.
-
-The current search hyperparameters are:
-
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `target_mode` | `all` | Explain all recorded output tokens |
-| `target_token_limit` | unset | Do not truncate the attribution target |
-| `score_type` | `logit` | Use the raw target-token logits |
-| `score_reduction` | `sum` | Sum over target output tokens |
-| `target_recovery` | `0.95` | Early-stop recovery threshold |
-| `absolute_atol` | `1e-4` | Absolute full-score tolerance |
-| `relative_rtol` | `1e-3` | Relative full-score tolerance |
-| `patience` | `1` | Consecutive qualifying steps required |
-| `batch_size` | `4` | Candidate variants per model batch |
-| `max_selected_sentences` | unset | Search until recovery or exhaustion |
-| `min_selected_sentences` | `2` | Substantive sentences required by binary metric |
-| `min_sentence_words` | `4` | Minimum substantive sentence length |
-| `saliency_floor` | `0.4` | Display-only saliency of the final selected sentence |
-
-### Sentence saliency
-
-The selected early-stop prefix receives a display saliency without additional
-model forwards. For consecutive selected scores:
-
-```text
-d_k = abs(score_k - score_(k-1))
-C_k = sum(d_i for i <= k)
-```
-
-The selected prefix is normalized so the first greedy sentence has saliency
-`1.0` and the last selected sentence has saliency `0.4`. Unselected sentences
-have `null` saliency and remain gray in the visualization. This saliency only
-explains differences within the selected prefix; it does not replace edge
-importance.
-
-### Edge importance and matrices
-
-The primary edge metric follows the method definition:
-
-```text
-token_ratio =
-    selected source-output tokenizer tokens
-    / all visible source-output tokenizer tokens
-```
-
-Token ownership is source-local and deduplicated across sentence boundaries.
-System, task, header, template, and special tokens are excluded from both the
-numerator and denominator. `binary` and `word_ratio` remain available as
-ablation metrics.
-
-Every sample stores separate spatial and temporal matrices with orientation:
-
-```text
-[round][source][target]
-```
-
-Reviewer attribution is stored separately and never inserted into the worker
-`N x N` matrices. Incorrect samples retain all per-node artifacts and sample
-matrices, but only `correct_verified=true` samples contribute to aggregate
-matrices and pruning policies.
-
-### Per-node and per-sample visualizations
-
-Each event produces:
-
-- `event_*.json`: complete input, output, incoming text, candidates, curve,
-  edge scores, generation metadata, and attribution metadata;
-- `event_*.html`: readable complete report;
-- `event_*.svg`: sentence-level attribution map with orange saliency gradient;
-- `event_*.insertion_curve.svg`: observed insertion score versus retained
-  sentence percentage, with the early-stop sentence count, sentence ratio,
-  token ratio, recovery, target line, and separate full-input endpoint.
-
-Each sample also produces:
-
-- `node_attribution_index.json`;
-- `sample_edge_matrices.json`;
-- `sample_token_ratio_matrices.png`.
-
-Correct-only aggregation produces aggregate JSON, round-specific heatmaps, and
-token-ratio/binary/word-ratio policies.
-
-## Code map
-
-| File | Responsibility |
+| Guide | Contents |
 |---|---|
-| `AgentAttrPrune/graph/multi_agent.py` | Shared dense/pruned multi-agent execution loop |
-| `AgentAttrPrune/llm/hf_chat.py` | Local Hugging Face generation and exact termination metadata |
-| `AgentAttrPrune/tracing/recorder.py` | Schema-v1 traces and incoming provenance |
-| `AgentAttrPrune/attribution/scoring.py` | Batched teacher-forced logit/log-probability/probability scoring |
-| `AgentAttrPrune/attribution/edge.py` | Incoming-only sentence masks, exact greedy search, edge metrics, matrices |
-| `AgentAttrPrune/attribution/visualization.py` | Sentence SVGs, insertion curves, HTML reports, matrix heatmaps |
-| `AgentAttrPrune/attribution/calibrator.py` | Per-event attribution, caching, aggregation, policy publication |
-| `AgentAttrPrune/pruning/policy.py` | Validation and replay of round-specific spatial/temporal masks |
-| `experiments_attrprune/common.py` | Run paths, dataset identity, worker order, configuration fingerprint |
-| `experiments_attrprune/*.py` | Thin experiment CLIs |
-
-## Invariants
-
-- Every matrix uses `[round][source][target]`.
-- Spatial and temporal matrices are never merged.
-- Dense and pruned runs share the same workers, prompts, reviewer, decoding
-  parameters, and execution loop.
-- Reviewer edges remain dense and do not enter worker matrices.
-- Policies are calibrated only from baseline-correct calibration traces.
-- Val/test samples never contribute to attribution aggregation.
-- Formal traces require exact prompt and generated token IDs.
-- Sample matrices, aggregate matrices, policies, and evaluations are bound to
-  the same `run_config.json` fingerprint.
-- A failed correct-sample attribution prevents publication of a partial policy.
-- Generated artifacts stay under `results/AgentAttrPrune`.
+| [MMLU ablations](docs/mmlu_ablations.md) | Random order, sampled policies, reordered graphs, empty-round skipping, and calibration resampling |
+| [GSM8K experiments](docs/gsm8k_experiments.md) | Train40 calibration, global/uniform static pruning, test evaluation, and visualization |
+| [Attribution specification](docs/attribution_edge_pruning.md) | Scoring, sentence search, correctness routing, denominators, and artifact schemas |
+| [Experiment reference](experiments_attrprune/README.md) | General benchmark stages, batching, and legacy workflows |
+| [Dataset setup](data/README.md) | Local layouts, downloads, and calibration/evaluation splits |
 
 ## Installation
 
-Requirements:
-
-- Python 3.10 or newer;
-- PyTorch with CUDA support;
-- Transformers 4.51 or newer for Qwen3;
-- Accelerate for `device_map=auto`;
-- local Qwen3 model weights.
+Use Python 3.10+, CUDA-enabled PyTorch, Transformers 4.51+, Accelerate, and
+local Qwen3 model weights. From the repository root:
 
 ```bash
 conda create -n agentattrprune python=3.10 -y
 conda activate agentattrprune
-pip install -e .
-```
-
-Install development dependencies with:
-
-```bash
 pip install -e '.[test]'
-```
 
-The repository defaults to:
+# Use this environment instead of the launchers' lab-specific defaults.
+export CONDA_ENV=''
+export PYTHON_BIN="$(command -v python)"
+export MODEL_PATH=/path/to/Qwen3-8B
+export MMLU_DATA_DIR="$PWD/data/MMLU"
+export GSM8K_DATA_DIR="$PWD/data/GSM8K"
 
-```text
-/egr/research-optml/ruoyu.chen/Models/Qwen3-8B
-```
-
-Override it with `MODEL_PATH`. See [data/README.md](data/README.md) for dataset
-placement and download commands.
-
-## Running MMLU
-
-Run all commands from the repository root.
-
-### Dry run
-
-Print resolved commands without loading a model:
-
-```bash
-DRY_RUN=1 ./experiments_attrprune/run_mmlu.sh all
-```
-
-### One-sample attribution
-
-Generate all worker-round and reviewer artifacts for one dev sample:
-
-```bash
-RUN_NAME=mmlu/qwen3_8b/sample_0 \
-DEV_START_INDEX=0 \
-MAX_NEW_TOKENS=512 \
-./experiments_attrprune/run_mmlu.sh one-sample
-```
-
-### Full dev calibration only
-
-`calibrate` runs MMLU dev trace collection, attributes every node in every
-selected sample, and aggregates correct-only matrices. It does not run val or
-test evaluation.
-
-Example for eight visible A6000 GPUs:
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-CONDA_ENV=agentprune \
-MMLU_DATA_DIR=/path/to/MMLU/data \
-RUN_NAME=mmlu/qwen3_8b/full_dev_a6000x8_tok2048 \
-DEV_START_INDEX=0 \
-DEV_LIMIT=285 \
-MAX_NEW_TOKENS=2048 \
-ATTR_BATCH_SIZE=4 \
-TARGET_RECOVERY=0.95 \
-SALIENCY_FLOOR=0.4 \
-./run_full_mmlu.sh calibrate
-```
-
-`MAX_NEW_TOKENS` is only a ceiling. Generation stops normally at EOS. A node
-that reaches the ceiling is marked as truncated, and its sample is rejected
-from formal calibration. Leaving `TARGET_TOKEN_LIMIT` unset explains all tokens
-that were actually generated.
-
-`device_map=auto` provides model sharding, not data parallelism. A Qwen3-8B
-model may fit on one 48 GB A6000, so making eight GPUs visible does not
-guarantee that all eight devices will be saturated.
-
-### Full dev-to-val protocol
-
-Run dev calibration, dense/binary/token-ratio val evaluation, and comparison:
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
-./experiments_attrprune/run_mmlu.sh all
-```
-
-### Individual stages
-
-```bash
-# Dense MMLU dev traces
-./experiments_attrprune/run_mmlu.sh traces
-
-# Per-node attribution, sample matrices, correct-only aggregate, policies
-./experiments_attrprune/run_mmlu.sh attribution
-
-# Rebuild aggregate matrices and policies from cached events
-./experiments_attrprune/run_mmlu.sh aggregate
-
-# Rebuild sentence SVGs, insertion curves, and HTML without loading the model
-./experiments_attrprune/run_mmlu.sh render
-
-# Frozen-policy validation
-./experiments_attrprune/run_mmlu.sh eval-dense
-./experiments_attrprune/run_mmlu.sh eval-binary
-./experiments_attrprune/run_mmlu.sh eval-token-ratio
-./experiments_attrprune/run_mmlu.sh eval-word-ratio
-
-# Standard evaluation bundle and summary
-./experiments_attrprune/run_mmlu.sh eval
-./experiments_attrprune/run_mmlu.sh compare
-```
-
-Resume completed trace samples with:
-
-```bash
-RESUME=1 ./experiments_attrprune/run_mmlu.sh traces
-```
-
-Render cached event JSON again with a different display floor:
-
-```bash
-SALIENCY_FLOOR=0.4 ./experiments_attrprune/run_mmlu.sh render
-```
-
-Use a new `RUN_NAME` whenever the model, data snapshot, worker configuration,
-round count, or generation settings change.
-
-### Static MMLU pruning-rate sweep
-
-After `aggregate_edge_matrices.json` has been generated, static policies can
-be built and evaluated at several pruning rates without rerunning attribution.
-The original allocation remains the default: it rounds and applies the
-requested rate independently to each round and each edge type
-(`spatial`/`temporal`).
-
-The optional global allocation instead flattens every observed spatial and
-temporal edge across all rounds, sorts them by importance, and applies one
-pruning budget to the whole set:
-
-```bash
-PRUNING_SCOPE=global \
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-./run_static_mmlu_pruning_sweep.sh all 5 10 20 30 40 50
-```
-
-Generate only the global policy JSON files with:
-
-```bash
-PRUNING_SCOPE=global \
-./run_static_mmlu_pruning_sweep.sh prepare 5 10 20 30 40 50
-```
-
-Omit `PRUNING_SCOPE` or set it to `per_round_edge_type` to reproduce the old
-behavior. Global policies are written below
-`attribution/static_pruning/token_ratio_conditional_mean_global/`, and their
-evaluations use `_global`-suffixed names, so old policies, checkpoints, and
-summaries are not overwritten.
-
-## Running GSM8K and HumanEval
-
-Download all missing files:
-
-```bash
 python -m AgentAttrPrune.datasets.download all --data-root data
 ```
 
-The root launchers default to eight visible GPUs, Qwen3-8B, two rounds,
-`MAX_NEW_TOKENS=2048`, and the complete local dataset selections. `calibrate`
-uses only the calibration split and writes all per-node attribution SVG/HTML,
-sample matrices, aggregate heatmaps, and policies:
+Run commands from the repository root. Select available GPUs explicitly with
+`CUDA_VISIBLE_DEVICES`; the GPU IDs in the examples are illustrative. Shell
+launchers support `--help` and, where documented, `DRY_RUN=1`. Some convenience
+scripts retain the original lab's model/interpreter paths, so set the environment
+above when using another machine. Experiments derived from an existing run inherit
+its frozen model and data configuration instead of accepting a replacement model.
+
+Model placement uses `device_map=auto`. Making two GPUs visible does not imply
+data parallelism or equal utilization of both devices.
+
+## Method and experiment contract
+
+A dense round executes workers in order: each worker can receive spatial messages
+from all earlier workers. Round 0 has no temporal inputs; Round 1 can receive all
+previous-round worker outputs, including the same worker's earlier output. The
+reviewer reads all final-round worker outputs and is excluded from pruning.
+
+| Benchmark | Calibration / evaluation | Workers in canonical order | Two-round worker edges | Calls per dense sample |
+|---|---|---|---:|---:|
+| MMLU | dev (285) / val (1,531) | Knowledgeable Expert, Critic, Mathematician, Psychologist, Historian | 45 | 11 |
+| GSM8K | train (7,473) / test (1,319) | Math Solver, Mathematical Analyst, Programming Expert, Inspector | 28 | 9 |
+| HumanEval | fixed dev (80) / disjoint test (81) | Project Manager, Algorithm Designer, Programming Expert, Test Analyst, Bug Fixer | 45 | 11 |
+
+The current fixed-order small-calibration profiles use Qwen3-8B, two rounds, temperature 0,
+a 2,048-token generation ceiling, thinking disabled, serial calibration
+collection, attribution batch 4, and evaluation batch 4. MMLU and GSM8K preserve
+opaque reviewer source IDs in the run configuration; canonical agent identities
+remain available in every trace and matrix.
+
+### Correctness-aware attribution
+
+The `dev40` and `train40` profiles use **correctness-aware attribution with all
+selected samples**, including final-reviewer errors:
+
+1. Record the ordinary dense graph, preserving every original upstream output.
+2. Correct receiving workers use teacher-forced attribution of their full output,
+   with logit-sum scoring and the original 0.95-recovery early stop.
+3. Incorrect workers use full greedy gold-prefix insertion. Select the earliest
+   maximum-scoring prefix, then verify once without gold under the original prompt.
+4. Successful verification contributes the selected-source-token ratio. Failed
+   verification contributes zero, while the observed edge remains in the denominator.
+
+Local verification never rewrites the original trace or propagates a corrected
+answer downstream. The reviewer retains ordinary attribution. Incorrect-node
+insertion runs to completion; it does not use the correct-node recovery early stop.
+The selected prefix is not guaranteed to be the globally smallest sufficient set.
+
+MMLU routes workers using their explicit `Decision` field. GSM8K uses the explicit
+`The answer is <number>` field and supports multi-token numeric answers. Missing
+or invalid answer fields take the incorrect-worker branch. Truncation, runtime
+failure, and token-alignment errors cannot be counted as successful zero attribution.
+
+The general-purpose legacy runners still default to `original` attribution and
+final-correct-only aggregation. Record the attribution mode and aggregation scope
+when comparing experiments.
+
+### Edge importance and averaging
+
+The primary metric is `token_ratio`: selected source-output tokenizer tokens
+divided by all visible tokens from that source. Task text, prompts, labels,
+separators, and special tokens are excluded. `binary` and `word_ratio` are also
+available. Matrices always use **`[round][source][target]`**.
+
+For an edge that appears in only some traces:
+
+\[
+\operatorname{conditional\_mean}_e =
+\frac{\sum_{t:\,e\text{ exists in }t} \operatorname{importance}_{e,t}}
+     {\#\{t:e\text{ exists in }t\}}.
+\]
+
+An absent edge does not enter the denominator. An existing edge whose local rescue
+fails contributes zero and does enter it. For example, scores `0.6, 0.3, 0` across
+three observed occurrences give `0.3`, even if a fourth trace lacks the edge.
+Spatial self-edges are forbidden; cross-round self-temporal edges are allowed.
+Reviewer attribution is stored separately from worker matrices.
+
+## MMLU: original fixed-order baseline
+
+This profile selects the first 40 dev questions after dataset shuffle seed 888.
+The run seed is 0. Calibration stops before validation; prepare and
+evaluate pruning policies separately:
 
 ```bash
-# All 7,473 GSM8K train samples; no test evaluation
-./run_full_gsm8k.sh calibrate
+CUDA_VISIBLE_DEVICES=0,1 ./run_mmlu_dev40_correctness_aware.sh calibrate
 
-# All 80 examples in the fixed HumanEval calibration partition; no test evaluation
-./run_full_humaneval.sh calibrate
+./run_mmlu_dev40_correctness_aware.sh prepare 25 50 60 70 80 90
+CUDA_VISIBLE_DEVICES=0,1 ./run_mmlu_dev40_correctness_aware.sh eval 25 50 60 70 80 90
+./run_mmlu_dev40_correctness_aware.sh summarize
 ```
 
-Use `all` to append frozen-policy evaluation on GSM8K test or the disjoint
-HumanEval test partition:
+The default run is `results/AgentAttrPrune/mmlu/qwen3_8b/dev40_correctness_aware`.
+Explicit rates override the launcher's default rate list. Add `0` to both
+`prepare` and `eval` for a dense control. Preparing a sweep writes its rate
+manifest: prepare the complete intended rate list before parallel evaluation.
+
+Global static pruning ranks the 45 worker candidates together. The six requested
+rates above retain **34, 23, 18, 14, 9, and 5** worker edges under the existing
+rounding rule. Every retained edge is used on every inference; there is no
+Bernoulli sampling. The five reviewer inputs are never pruned. Evaluation uses
+all 1,531 val questions and saves per-question predictions and traces.
+
+`run_mmlu_fixed_order_25_70.sh` is a source-preserving supplement for the original
+local run: it adds 25% and 70% results without replacing the earlier sweep
+manifest. Its source-preservation checks are tied to that run. Use the general
+profile above for a new installation.
+
+## MMLU ablation workflows
+
+| Experiment | Calibration or policy change | Evaluation behavior |
+|---|---|---|
+| Random-order Dense | Independently permute workers in each round | Calibration/attribution only |
+| Random-order sampled policy | Prune random-order importance matrices globally or uniformly; use importance as a logit | Sample edges at every inference, rejecting spatial cycles |
+| Row-sum minus column-sum, direct | Freeze an order per round; project existing importance onto forward edges | Static global pruning |
+| Row-sum minus column-sum, recalibrate | Regenerate the same dev40 under the frozen new orders and re-attribute | Static global pruning |
+| Skip empty Round 1 | If both Round 1 masks are empty, send Round 0 outputs directly to reviewer | Separate evaluation checkpoints |
+| Independent dev40 resampling | Change only the 40 calibration questions, using selection seeds 1 and 2 | Six static global pruning rates |
+
+### Random-order Dense calibration
+
+Each round uses its own independently drawn uniform worker permutation. Agent
+identities and matrix coordinates stay fixed. Each rollout still has 10 spatial
+edges per round and 25 Round 1 temporal edges. The full profile freezes
+**40 questions × 10 repeats = 400 rollouts**:
 
 ```bash
-./run_full_gsm8k.sh all
-./run_full_humaneval.sh all
+CUDA_VISIBLE_DEVICES=0,1 ./run_mmlu_dev40_random_order.sh calibrate
+./run_mmlu_dev40_random_order.sh visualize
 ```
 
-The lightweight wrappers expose the same stages and environment controls:
+For the smaller experiment used subsequently, reuse exactly `repeat_00` from each
+question in the frozen larger run:
 
 ```bash
-# GSM8K train calibration -> test evaluation
-DRY_RUN=1 ./experiments_attrprune/run_gsm8k.sh all
-./experiments_attrprune/run_gsm8k.sh one-sample
-
-# Fixed HumanEval dev calibration -> disjoint test evaluation
-DRY_RUN=1 ./experiments_attrprune/run_humaneval.sh all
-./experiments_attrprune/run_humaneval.sh one-sample
+./run_mmlu_dev40_random_order_once.sh prepare
+CUDA_VISIBLE_DEVICES=0,1 ./run_mmlu_dev40_random_order_once.sh calibrate
 ```
 
-The shared entrypoint is also available directly:
+This subset wrapper requires existing source traces; it does not generate 40 new
+traces. It reuses valid completed attribution and computes missing attribution.
+The larger attribution run must not write concurrently. A fresh 40-rollout CLI
+recipe, source requirements, and all individual stages are in the
+[MMLU guide](docs/mmlu_ablations.md#random-order-400-rollouts-and-the-40-rollout-subset).
+
+Random ordering makes both directions of a worker pair observable across traces.
+Unobserved positions remain distinguishable from observed zero importance. The
+400-rollout budget reproduces a local AgentPrune GSM8K sampling budget; it is not
+a claim of exact alignment with AgentPrune's MMLU setup.
+
+### Global and uniform pruning followed by edge sampling
+
+Use the completed random-order dev40 matrix, retaining separate round matrices:
 
 ```bash
-BENCHMARK=gsm8k ./experiments_attrprune/run_benchmark.sh calibrate
-BENCHMARK=humaneval ./experiments_attrprune/run_benchmark.sh eval-dense
+CUDA_VISIBLE_DEVICES=0,1 ./run_mmlu_random_order_sampling.sh global 50 60
+CUDA_VISIBLE_DEVICES=2,3 ./run_mmlu_random_order_sampling.sh uniform 50 60
 ```
 
-Use `DATA_DIR`, `CALIBRATION_LIMIT`, `EVALUATION_LIMIT`,
-`CALIBRATION_SPLIT`, and `EVALUATION_SPLIT` with the shared entrypoint.
-HumanEval correctness runs generated Python in a limited subprocess; this is
-not a security boundary for hostile code.
+Global pruning ranks **65** candidates together: 20 spatial directions per round
+plus 25 temporal edges. Uniform pruning allocates the rate independently to
+Round 0 spatial, Round 1 spatial, and Round 1 temporal. Each rate starts from
+the original unpruned matrices.
 
-## Common environment variables
+After pruning, the remaining edge's raw importance is treated as a logit:
+`p(edge) = sigmoid(importance)`. Each inference samples a new graph; spatial
+cycle checks keep it executable. These probabilities are not learned AgentPrune
+logits or estimates of causal importance. This is an AgentPrune-style graph
+sampling ablation, not a reproduction of its trainable optimizer. See the
+[MMLU guide](docs/mmlu_ablations.md) for exact replay and visualization details.
 
-| Variable | Shell default | Meaning |
-|---|---:|---|
-| `MODEL_PATH` | local Qwen3-8B path | Generation and attribution model |
-| `MMLU_DATA_DIR` | `data/MMLU` | MMLU root or directory containing `data/` |
-| `GSM8K_DATA_DIR` | `data/GSM8K` | Directory containing `train.jsonl` and `test.jsonl` |
-| `HUMANEVAL_DATA_DIR` | `data/HumanEval` | Directory containing `humaneval-py.jsonl` |
-| `RESULTS_ROOT` | `results/AgentAttrPrune` | Generated-artifact root |
-| `RUN_NAME` | derived from model/seed | Run subdirectory |
-| `CALIBRATION_START_INDEX` | `0` | Generic runner's first calibration sample |
-| `CALIBRATION_LIMIT` | benchmark-specific | Generic runner's calibration sample count |
-| `EVALUATION_LIMIT` | benchmark-specific | Generic runner's frozen-policy evaluation count |
-| `DEV_START_INDEX` | `0` | First shuffled dev sample |
-| `DEV_LIMIT` | `285` | Dev calibration sample count |
-| `VAL_LIMIT` | `1531` | Val evaluation sample count |
-| `NUM_WORKERS` | `5` | Worker count |
-| `NUM_ROUNDS` | `2` | Reasoning rounds |
-| `TEMPERATURE` | `0` | Deterministic generation temperature |
-| `MAX_NEW_TOKENS` | `2048` | Per-node generation ceiling; generation still stops at EOS |
-| `ATTR_BATCH_SIZE` | `4` | Candidate inference batch size |
-| `TARGET_TOKEN_LIMIT` | unset | Optional attribution-target prefix |
-| `TARGET_RECOVERY` | `0.95` | Early-stop recovery threshold |
-| `SALIENCY_FLOOR` | `0.4` | Display-only selected-prefix floor |
-| `POLICY_PRUNING_RATE` | `0.25` | Per-round, per-edge-type pruning rate |
-| `RESUME` | `0` | Reuse completed trace attempts and validated evaluation checkpoints |
-| `OVERWRITE_ATTRIBUTION` | `0` | Recompute cached attribution events |
-| `KEEP_GOING` | `0` | Collect failures but still reject a partial policy |
-| `DRY_RUN` | `0` | Print commands without executing them |
+### Agent ordering: direct projection versus recalibration
 
-All `run_full_*.sh` launchers default the generation ceiling to `2048` unless
-`MAX_NEW_TOKENS` is set explicitly.
-
-Show every stage and override with:
+For each round separately, compute `score_i = row_sum_i - column_sum_i` on the
+raw spatial conditional means, then sort descending, breaking ties by canonical
+identity order. Freeze those orders before either branch. Retain only forward
+spatial edges; keep all 25 temporal candidates.
 
 ```bash
-./experiments_attrprune/run_mmlu.sh --help
+CUDA_VISIBLE_DEVICES=4,5 ./run_mmlu_reordered_pruning.sh direct all 80 60 50
+CUDA_VISIBLE_DEVICES=6,7 ./run_mmlu_reordered_pruning.sh recalibrate all 80 60 50
 ```
 
-## Output layout
+The direct branch preserves the original importance sums and observation counts
+on allowed edges. The recalibration branch reruns exactly the same 40 questions
+and attributes the new traces; each allowed edge then has 40 observations.
+Both branches prune globally over 45 candidates, retain 9/18/23 edges at
+80/60/50%, and use fixed masks at inference. Recalibration does not change the
+already frozen orders.
+
+The original reordered evaluations execute both worker rounds. To reproduce
+the separate 80% empty-round ablation while preserving those results:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 ./run_mmlu_reordered_skip_empty80.sh both
+```
+
+Only when **both** Round 1 spatial and temporal masks are empty does this evaluator
+skip its five calls and give the reviewer all five Round 0 outputs. The resulting
+sample has six calls instead of eleven. Other ratios and existing checkpoints
+are unchanged.
+
+### Two additional independent dev40 cohorts
+
+```bash
+# CPU preparation, then the complete two-cohort queue.
+STAGE=prepare ./run_mmlu_dev40_resampling.sh 1 2
+CUDA_VISIBLE_DEVICES=6,7 ./run_mmlu_dev40_resampling.sh 1 2
+```
+
+Each selection seed independently draws 40 distinct dev questions; overlap
+between cohorts is allowed. Only calibration membership changes: generation seed
+0, canonical order, reviewer aliases, attribution settings, and all 1,531 val
+questions are inherited from the original run. Cohorts run sequentially, each
+with **25%, 50%, 60%, 70%, 80%, 90%** static pruning. These evaluators apply the
+empty-Round-1 rule at every rate. The original cohort is reused, not regenerated.
+
+The launcher saves results and per-cohort summaries; it does not draw an error-bar
+curve. Repeating the same command resumes completed work. See
+[resampling details](docs/resampled_mmlu.md).
+
+## GSM8K: train40 and static pruning
+
+The correctness-aware profile uses the first 40 shuffled training questions,
+four workers, two rounds, and the full 1,319-question test split. Run global
+pruning as follows:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 ./run_gsm8k_train40_correctness_aware.sh calibrate
+./run_gsm8k_train40_correctness_aware.sh prepare 50 60 80
+CUDA_VISIBLE_DEVICES=0,1 ./run_gsm8k_train40_correctness_aware.sh eval 50 60 80
+./run_gsm8k_train40_correctness_aware.sh summarize
+```
+
+Global pruning ranks all 28 worker edges together: 12 spatial and 16 temporal.
+At 50/60/80%, it retains 14/11/6 edges. The four reviewer inputs remain dense.
+
+To compare uniform allocation using the same completed attribution:
+
+```bash
+./run_gsm8k_train40_uniform_pruning.sh prepare 50 60 80
+CUDA_VISIBLE_DEVICES=2,3 ./run_gsm8k_train40_uniform_pruning.sh eval 50 60 80
+./run_gsm8k_train40_uniform_pruning.sh summarize
+```
+
+Here "uniform" means pruning independently per round and edge type. It is still
+**static** pruning and has no sigmoid or per-inference edge sampling. Separate
+policy/evaluation directories preserve global results. The detailed
+[GSM8K guide](docs/gsm8k_experiments.md) covers numeric answer parsing, data,
+rounding, output paths, and visualization commands.
+
+The general `run_full_gsm8k.sh`, `run_full_humaneval.sh`, and
+`experiments_attrprune/run_*.sh` entrypoints remain available for full-split or
+legacy experiments. Their defaults differ from the train40/dev40 profiles;
+consult the [experiment reference](experiments_attrprune/README.md).
+
+## Visualization
+
+All plotting can use saved JSON without loading the language model. The display
+uses short names such as **Knowl., Critic, Math., Psych., Hist.** while preserving
+canonical IDs in saved data. PNG supports inspection, SVG supports scalable
+figures, and JSON/CSV retain values and provenance where exported by the renderer.
+
+### Frozen policies and unpruned importance
+
+```bash
+BASE=results/AgentAttrPrune/mmlu/qwen3_8b/dev40_correctness_aware
+POLICIES="$BASE/attribution/static_pruning/token_ratio_conditional_mean_global/policies"
+
+python -m experiments_attrprune.visualize_pruning_matrices \
+  "$POLICIES/prune_50pct.json" "$POLICIES/prune_60pct.json" \
+  "$POLICIES/prune_80pct.json" \
+  --output-dir "$BASE/visualizations/pruning" --color-max 1.0
+
+python -m experiments_attrprune.visualize_pruning_matrices \
+  "$POLICIES/prune_50pct.json" --intensity-only \
+  --output-dir "$BASE/visualizations/importance" --color-max 1.0
+```
+
+The first command writes a figure for each supplied policy. The second shows all
+candidate attribution values without the pruning overlay. Choose a shared color
+maximum large enough for all compared matrices; values above a supplied maximum
+must not be silently clipped. The same renderer accepts GSM8K policies.
+
+### Random-order and reordered matrices
+
+```bash
+./run_mmlu_dev40_random_order_once.sh visualize
+./run_mmlu_reordered_pruning.sh direct visualize
+./run_mmlu_reordered_pruning.sh recalibrate visualize
+```
+
+Random-order plots include per-round importance and observation-count heatmaps.
+The cross-round spatial summary is **the two rounds' importance sum divided by
+their total observed count**, not an unweighted average of means. Fixed-order
+comparison panels are explicitly labeled with their own calibration budget.
+
+For reordered plots, spatial axes follow that round's execution order. Round 1
+temporal rows follow the Round 0 source order and columns follow the Round 1
+target order. Round 0 temporal is marked absent. Spatial diagonals indicate
+forbidden self-connections; unobserved entries and measured zero are distinct.
+See [visualization recipes](docs/mmlu_ablations.md) for sigmoid probability
+matrices and global/uniform comparisons.
+
+For a completed or prepared sampled-policy experiment, export the sigmoid
+probabilities and compare global versus uniform pruning on the same scale:
+
+```bash
+RANDOM_RUN=results/AgentAttrPrune/mmlu/qwen3_8b/dev40_random_order1_correctness_aware
+python -m experiments_attrprune.visualize_sampled_mmlu \
+  --evaluation-root "$RANDOM_RUN/evaluation/agentprune_sampling/per_round_sigmoid" \
+  --output-dir "$RANDOM_RUN/visualizations/sampled_policies" \
+  --scopes global uniform --percentages 50 60
+```
+
+These are Bernoulli sampling thresholds for cycle-eligible edges, not empirical
+edge-inclusion frequencies after cycle rejection. Pruned candidates and absent
+edges have separate visual markers.
+
+### Sentence reports and insertion curves
+
+Each attributed event stores JSON, HTML, a sentence-attribution SVG, and insertion
+curve SVG. Correct-node curves show recovery and the selected early-stop prefix;
+incorrect-node reports include full gold-prefix insertion/deletion diagnostics,
+the earliest peak, and no-gold verification. Curves explain the attribution
+search, not validation accuracy.
+
+Re-render saved event reports without model inference:
+
+```bash
+ATTRIBUTION_MODE=correctness-aware AGGREGATION_SCOPE=all \
+RUN_NAME=mmlu/qwen3_8b/dev40_correctness_aware \
+  ./experiments_attrprune/run_mmlu.sh render
+ATTRIBUTION_MODE=correctness-aware AGGREGATION_SCOPE=all \
+RUN_NAME=gsm8k/qwen3_8b/train40_correctness_aware \
+  ./experiments_attrprune/run_gsm8k.sh render
+```
+
+## Outputs, resume, and comparison
+
+A typical run contains:
 
 ```text
-results/AgentAttrPrune/<benchmark>/qwen3_8b/seed_<seed>/
+results/AgentAttrPrune/<benchmark>/qwen3_8b/<run>/
 ├── run_config.json
-├── calibration/
-│   ├── attempts.jsonl
-│   ├── correct_results.jsonl
-│   ├── summary.json
-│   └── traces/sample_XXXXX/trace.json
+├── calibration/                 # Selection, state, and per-question traces
 ├── attribution/
 │   ├── manifest.json
 │   ├── aggregate_edge_matrices.json
-│   ├── aggregate_token_ratio_matrices.png
-│   ├── pruned_policy_token_ratio.json
-│   ├── pruned_policy_binary.json
-│   ├── pruned_policy_word_ratio.json
-│   └── sample_XXXXX/
-│       ├── node_attribution_index.json
-│       ├── event_*.json
-│       ├── event_*.svg
-│       ├── event_*.insertion_curve.svg
-│       ├── event_*.html
-│       ├── sample_edge_matrices.json
-│       └── sample_token_ratio_matrices.png
-├── evaluation/
-│   ├── dense_val/
-│   │   ├── evaluation_state.json
-│   │   ├── predictions.jsonl
-│   │   └── evaluation_summary.json
-│   ├── binary_val/
-│   └── token_ratio_val/
-├── comparison_summary.json
-└── comparison_summary.csv
+│   └── sample_*/                # Event reports, curves, node index, matrices
+├── evaluation/                  # Separate directories per policy/experiment
+│   └── <evaluation>/
+│       ├── predictions.jsonl
+│       └── evaluation_summary.json
+└── ...                          # Frozen order plans, policies, summaries
 ```
 
-The run configuration records the model, benchmark path and content hashes, worker
-order, rounds, decoding parameters, topology, seed, and fingerprint. Cached
-events, policies, and evaluations are rejected when their fingerprints do not
-match.
+Exact paths depend on the experiment; policies may live under
+`attribution/static_pruning/` or a run-level `policies/` directory. Launchers print
+resolved run and log paths. Independent evaluations preserve the original
+calibration artifacts and use distinct checkpoints.
 
-Generated data is ignored by Git. See
-[results/AgentAttrPrune/README.md](results/AgentAttrPrune/README.md).
+Keep model, dataset, prompt contract, source identities, aggregation scope,
+decoding, and evaluation batch size consistent. Floating-point differences in
+batched generation can change greedy outputs, so batch 1 and batch 4 should not
+be mixed in an accuracy comparison. Changing frozen settings requires a new
+run/evaluation identity. Missing, changed, duplicate, or incomplete artifacts
+are rejected rather than silently reused as complete results.
 
-During evaluation, `predictions.jsonl` is atomically rewritten and synced after
-each completed sample. A rerun with `--resume` validates
-`evaluation_state.json`, skips all completed sample indices (including wrong
-predictions), and evaluates only the missing indices. The final summary is not
-written until the requested selection is complete; accuracy and token/call
-totals are then recomputed from the full persisted record set. The evaluation
-identity includes the run fingerprint, exact policy hash, dataset range, seed,
-and trace mode, preventing accidental mixtures across configurations.
+Report accuracy together with the calibration budget, pruning allocation,
+requested and actual retained edges, sampled edge counts when applicable,
+prompt/generated tokens, runtime, and empty-round execution rule. Validation or
+test questions never contribute to calibration attribution. Token-ratio
+importance and its sigmoid transform are not calibrated causal probabilities.
 
-## Fair-comparison protocol
+## Repository layout and testing
 
-1. Learn policies only from baseline-correct calibration traces.
-2. Evaluate every policy on the complete selected val split, including samples
-   that the dense baseline answers incorrectly.
-3. Reuse the same graph executor, worker order, roles, prompts, reviewer, and
-   generation settings for dense and pruned modes.
-4. Keep reviewer aggregation dense.
-5. Require matching run fingerprints and dataset identities.
-6. Report candidate/retained edges, effective edge retention, prompt/generated
-   tokens, runtime, and accuracy.
-7. Do not describe attribution importance as a calibrated causal probability.
-
-Future baselines must follow [baselines/README.md](baselines/README.md).
-
-## Tests
+```text
+AgentAttrPrune/          # Graphs, prompts, local model backend, tracing, attribution
+experiments_attrprune/   # Collection, attribution, evaluation, and visualization CLIs
+ablation/               # Additional isolated benchmark controls
+run_*.sh                # Experiment launchers
+docs/                   # Method and experiment guides
+tests/                  # Unit and CPU stub integration tests
+```
 
 ```bash
-python -m pytest -q
-bash -n experiments_attrprune/run_mmlu.sh
-bash -n run_full_mmlu.sh
-python -m experiments_attrprune.collect_correct --help
-python -m experiments_attrprune.attribute_edges --help
-python -m experiments_attrprune.evaluate_mmlu --help
-python -m experiments_attrprune.compare --help
+CUDA_VISIBLE_DEVICES='' python -m pytest -q
+bash -n run_mmlu_dev40_resampling.sh
+python -m experiments_attrprune.resampled_mmlu --help
+python -m experiments_attrprune.visualize_pruning_matrices --help
 ```
 
-The unit and stub end-to-end tests do not launch the full 285-sample GPU
-calibration.
+Tests exercise provenance, graph execution, correctness routing, observed-edge
+averaging, static/sampled policies, batching, resume, and visualization. They do
+not launch a full benchmark. Local datasets, model weights, logs, and generated
+experiment results are excluded from Git.
 
 ## Relationship to AgentPrune
 
-AgentAttrPrune adopts AgentPrune's fully connected multi-agent candidate
-topology and pruning-rate comparison idea, but learns deterministic,
-round-specific policies from sentence attribution.
-
-If you use this repository, also cite the original
-[AgentPrune paper](https://openreview.net/forum?id=LkzuPorQ5L):
+AgentAttrPrune adopts the multi-agent communication-pruning setting from
+[AgentPrune](https://openreview.net/forum?id=LkzuPorQ5L). Its main method derives
+round-specific policies from sentence attribution. The optional sampled-DAG
+ablation borrows graph-sampling mechanics but uses attribution-derived logits
+without AgentPrune's training objective.
 
 ```bibtex
 @inproceedings{zhang2025cut,

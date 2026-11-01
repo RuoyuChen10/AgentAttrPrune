@@ -5,9 +5,10 @@ import threading
 import time
 
 import pytest
+from torch.cuda import OutOfMemoryError
 
 from AgentAttrPrune.agents import WorkerSpec
-from AgentAttrPrune.graph import MultiAgentGraph
+from AgentAttrPrune.graph import GraphExecutionError, MultiAgentGraph
 from AgentAttrPrune.llm import generation_observer
 from AgentAttrPrune.pruning import RoundPolicy
 from AgentAttrPrune.tracing import GenerationTraceRecorder
@@ -18,6 +19,7 @@ SPECS = [
     WorkerSpec("b", "Mathematician"),
     WorkerSpec("c", "Historian"),
 ]
+REVIEWER_AGENT_IDS = {"a": "7vWW", "b": "5h3K", "c": "4rrd"}
 
 
 class RecordingStub:
@@ -118,7 +120,12 @@ def test_dense_topology_matches_full_connected_candidate_definition():
 def test_dense_and_explicit_full_policy_share_prompts_and_outputs():
     dense_llm = RecordingStub()
     explicit_llm = RecordingStub()
-    dense = MultiAgentGraph(dense_llm, SPECS, num_rounds=2)
+    dense = MultiAgentGraph(
+        dense_llm,
+        SPECS,
+        num_rounds=2,
+        reviewer_agent_ids=REVIEWER_AGENT_IDS,
+    )
     full_policy = RoundPolicy.dense(
         [spec.id for spec in SPECS],
         num_rounds=2,
@@ -126,7 +133,11 @@ def test_dense_and_explicit_full_policy_share_prompts_and_outputs():
         agent_types=["AnalyzeAgent"] * 3,
     )
     explicit = MultiAgentGraph(
-        explicit_llm, SPECS, num_rounds=2, policy=full_policy
+        explicit_llm,
+        SPECS,
+        num_rounds=2,
+        policy=full_policy,
+        reviewer_agent_ids=REVIEWER_AGENT_IDS,
     )
 
     dense_result = asyncio.run(dense.run_sample({"task": "Question"}))
@@ -143,7 +154,11 @@ def test_round_provenance_and_reviewer_are_recorded_dense(tmp_path):
         tmp_path / "trace.json", config={"split": "dev"}, sample={"task": "Q"}
     )
     graph = MultiAgentGraph(
-        RecordingStub(), SPECS, num_rounds=2, max_new_tokens=12
+        RecordingStub(),
+        SPECS,
+        num_rounds=2,
+        max_new_tokens=12,
+        reviewer_agent_ids=REVIEWER_AGENT_IDS,
     )
 
     result = asyncio.run(
@@ -164,6 +179,16 @@ def test_round_provenance_and_reviewer_are_recorded_dense(tmp_path):
     assert reviewer["agent_type"] == "FinalRefer"
     assert reviewer["spatial_incoming_from"] == ["a", "b", "c"]
     assert reviewer["temporal_incoming_from"] == []
+    reviewer_prompt = reviewer["input_messages"][-1]["content"]
+    assert "7vWW: Reasoning: stub" in reviewer_prompt
+    assert "5h3K: Reasoning: stub" in reviewer_prompt
+    assert "4rrd: Reasoning: stub" in reviewer_prompt
+    assert "\n\na: Reasoning: stub" not in reviewer_prompt
+    assert "\n\nb: Reasoning: stub" not in reviewer_prompt
+    assert "\n\nc: Reasoning: stub" not in reviewer_prompt
+    assert [
+        incoming["reviewer_agent_id"] for incoming in reviewer["incoming"]
+    ] == ["7vWW", "5h3K", "4rrd"]
     assert result.metrics["llm_calls"] == 7
     assert result.metrics["prompt_tokens"] == 21
     assert result.metrics["generated_tokens"] == 14
@@ -194,6 +219,77 @@ def test_task_local_observer_does_not_mix_concurrent_sample_recorders():
     assert {event["sample_index"] for event in second.events} == {20}
     assert all("first" in event["input_messages"][-1]["content"] for event in first.events)
     assert all("second" in event["input_messages"][-1]["content"] for event in second.events)
+
+
+def test_batch_provenance_is_preserved_and_counts_only_current_sample():
+    metadata = [
+        {"effective_batch_size": 1, "oom_fallback": True, "oom_split_depth": 3},
+        {"effective_batch_size": 1, "oom_fallback": True, "oom_split_depth": 3},
+        {"effective_batch_size": 1, "oom_fallback": True, "oom_split_depth": 3},
+        {"effective_batch_size": 2, "oom_fallback": True, "oom_split_depth": 1},
+        {"effective_batch_size": 4, "oom_fallback": False, "oom_split_depth": 0},
+        {},
+    ]
+
+    class BatchMetadataStub(RecordingStub):
+        async def agen(self, messages, **kwargs):
+            observer = generation_observer.get()
+            call_metadata = metadata[len(self.calls)]
+
+            def add_metadata(generation):
+                generation["generation_kwargs"].update(call_metadata)
+                observer(generation)
+
+            token = generation_observer.set(add_metadata)
+            try:
+                return await super().agen(messages, **kwargs)
+            finally:
+                generation_observer.reset(token)
+
+    graph = MultiAgentGraph(BatchMetadataStub(), SPECS[:2], num_rounds=1)
+    recorder = GenerationTraceRecorder(sample={"task": "Q"})
+    asyncio.run(graph.run_sample({"task": "earlier"}, recorder=recorder))
+    result = asyncio.run(graph.run_sample({"task": "current"}, recorder=recorder))
+
+    assert len(recorder.events) == 6
+    assert result.metrics["llm_calls"] == 3
+    assert result.metrics["batch_metadata_calls"] == 2
+    assert result.metrics["oom_fallback_calls"] == 1
+    assert result.metrics["oom_max_split_depth"] == 1
+    for event, expected in zip(recorder.events[3:], metadata[3:]):
+        assert {key: event["llm_call"][key] for key in expected} == expected
+    assert "effective_batch_size" not in recorder.events[-1]["llm_call"]
+
+    legacy_graph = MultiAgentGraph(RecordingStub(), SPECS[:2], num_rounds=1)
+    legacy_result = asyncio.run(
+        legacy_graph.run_sample({"task": "legacy backend"}, recorder=recorder)
+    )
+    assert legacy_result.metrics["llm_calls"] == 3
+    assert not {
+        "batch_metadata_calls", "oom_fallback_calls", "oom_max_split_depth"
+    }.intersection(legacy_result.metrics)
+
+
+def test_cuda_oom_is_not_retried_and_preserves_original_cause():
+    error = OutOfMemoryError("synthetic CUDA out of memory")
+
+    class OOMStub:
+        calls = 0
+
+        async def agen(self, messages, **kwargs):
+            self.calls += 1
+            raise error
+
+    llm = OOMStub()
+    graph = MultiAgentGraph(llm, SPECS[:1], num_rounds=1, max_tries=3)
+    recorder = GenerationTraceRecorder(sample={"task": "Q"})
+
+    with pytest.raises(GraphExecutionError, match="failed after 1 attempts") as raised:
+        asyncio.run(graph.run_sample({"task": "Q"}, recorder=recorder))
+
+    assert llm.calls == 1
+    assert raised.value.__cause__ is error
+    assert recorder.events == []
 
 
 def test_timed_out_thread_generation_is_not_committed_over_successful_retry():

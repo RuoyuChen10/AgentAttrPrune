@@ -30,6 +30,13 @@ from AgentAttrPrune.attribution.edge import (
     write_json,
 )
 from AgentAttrPrune.attribution.scoring import TeacherForcedTextScorer
+from AgentAttrPrune.attribution.correctness import (
+    GSM8K_ANSWER_PARSER_VERSION,
+    GSM8K_RESCUE_PROMPT_VERSION,
+    normalize_gold_answer,
+    parse_worker_answer,
+    run_gold_prefix_rescue,
+)
 from AgentAttrPrune.attribution.visualization import (
     write_aggregate_matrix_png,
     write_event_html,
@@ -41,6 +48,7 @@ from AgentAttrPrune.pruning import RoundPolicy
 
 
 ALGORITHM_VERSION = 3
+CORRECTNESS_ALGORITHM_VERSION = 1
 
 
 def _normalize_model_name(value: Optional[str]) -> Optional[str]:
@@ -70,6 +78,8 @@ class AttributionConfig:
     min_incoming: int = 2
     include_reviewer: bool = True
     enable_thinking: bool = False
+    attribution_mode: str = "original"
+    aggregation_scope: str = "correct"
 
     target_mode: str = "all"
     target_token_limit: Optional[int] = None
@@ -95,6 +105,22 @@ class AttributionConfig:
     visualizations: bool = True
 
     def __post_init__(self) -> None:
+        if self.attribution_mode not in {"original", "correctness-aware"}:
+            raise ValueError("attribution_mode must be original or correctness-aware")
+        if self.aggregation_scope not in {"correct", "all"}:
+            raise ValueError("aggregation_scope must be correct or all")
+        if self.attribution_mode == "correctness-aware" and (
+            self.target_mode != "all"
+            or self.score_type != "logit"
+            or self.score_reduction != "sum"
+            or self.target_token_limit is not None
+            or self.max_selected_sentences is not None
+            or self.enable_thinking
+        ):
+            raise ValueError(
+                "correctness-aware attribution requires complete all-token logit/sum "
+                "targets, unrestricted sentence search, and thinking disabled"
+            )
         if not self.sample_glob:
             raise ValueError("sample_glob must be non-empty")
         if self.sample_scope not in {"all", "correct"}:
@@ -228,6 +254,10 @@ class EdgeAttributionCalibrator:
         return value
 
     def _validate_trace(self, trace: Mapping[str, Any], trace_path: Path) -> None:
+        if self.config.attribution_mode == "correctness-aware":
+            if self._benchmark(trace) not in {"mmlu", "gsm8k"}:
+                raise ValueError("correctness-aware attribution supports MMLU and GSM8K only")
+            self._gold_answer(trace)
         schema = trace.get("schema_version")
         if schema is None and not self.config.allow_legacy_traces:
             raise ValueError(
@@ -391,6 +421,8 @@ class EdgeAttributionCalibrator:
 
     def _selection_configuration(self) -> dict[str, Any]:
         return {
+            "attribution_mode": self.config.attribution_mode,
+            "aggregation_scope": self.config.aggregation_scope,
             "sample_scope": self.config.sample_scope,
             "node_scope": self.config.node_scope,
             "min_incoming": self.config.min_incoming,
@@ -401,7 +433,30 @@ class EdgeAttributionCalibrator:
             "event_limit": self.config.event_limit,
         }
 
-    def _event_configuration(self, event: Mapping[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _benchmark(trace: Mapping[str, Any]) -> str:
+        return str((trace.get("config") or {}).get("benchmark", "mmlu")).lower()
+
+    @classmethod
+    def _gold_answer(cls, trace: Mapping[str, Any]) -> str:
+        benchmark = cls._benchmark(trace)
+        try:
+            return normalize_gold_answer((trace.get("sample") or {}).get("answer", ""), benchmark=benchmark)
+        except ValueError as error:
+            raise ValueError(
+                f"correctness-aware attribution requires a valid {benchmark.upper()} sample.answer"
+            ) from error
+
+    @staticmethod
+    def _verification_max_tokens(trace: Mapping[str, Any]) -> int:
+        value = int(((trace.get("config") or {}).get("decoding") or {}).get("max_new_tokens", 2048))
+        if value < 1:
+            raise ValueError("Verification max_new_tokens must be positive")
+        return value
+
+    def _event_configuration(
+        self, event: Mapping[str, Any], trace: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
         trace_payload = {
             key: event.get(key)
             for key in (
@@ -418,6 +473,13 @@ class EdgeAttributionCalibrator:
                 "llm_call",
             )
         }
+        if self.config.attribution_mode == "correctness-aware":
+            if trace is None:
+                raise ValueError("correctness-aware cache identity requires the source trace")
+            trace_payload["gold_answer"] = self._gold_answer(trace)
+            trace_payload["run_fingerprint"] = (trace.get("config") or {}).get("fingerprint")
+            if self._benchmark(trace) == "gsm8k":
+                trace_payload["benchmark"] = "gsm8k"
         encoded = json.dumps(
             trace_payload,
             ensure_ascii=False,
@@ -454,6 +516,30 @@ class EdgeAttributionCalibrator:
             "visualizations",
         ):
             config.pop(key, None)
+        if self.config.attribution_mode == "original" and self.config.aggregation_scope == "correct":
+            # Default original-mode events remain compatible with existing caches.
+            config.pop("attribution_mode", None)
+            config.pop("aggregation_scope", None)
+        if self.config.attribution_mode == "correctness-aware":
+            config.update({
+                "correctness_algorithm_version": CORRECTNESS_ALGORITHM_VERSION,
+                "decision_parser": "explicit_decision_v1",
+                "rescue_selection": "earliest_global_insertion_peak",
+                "verification_prompt": "original_reasoning_first",
+                "verification_do_sample": False,
+                "verification_max_new_tokens": self._verification_max_tokens(trace),
+            })
+            if self._benchmark(trace) == "gsm8k":
+                # Keep established MMLU cache identities unchanged. Numeric
+                # attribution has its own parser and scoring-prompt contract.
+                config.pop("decision_parser")
+                config.update({
+                    "correctness_benchmark": "gsm8k",
+                    "answer_parser": GSM8K_ANSWER_PARSER_VERSION,
+                    "answer_field": "The answer is <number>",
+                    "rescue_prompt_version": GSM8K_RESCUE_PROMPT_VERSION,
+                    "source_prompt_contract": dict((trace.get("config") or {}).get("prompt") or {}),
+                })
         return {
             "algorithm_version": ALGORITHM_VERSION,
             "model_name": str(getattr(scorer, "model_name", self.model_name)),
@@ -486,7 +572,7 @@ class EdgeAttributionCalibrator:
                     "Event generation model and attribution model differ: "
                     f"{event_model!r} vs {scorer_model!r}."
                 )
-        configuration = self._event_configuration(event)
+        configuration = self._event_configuration(event, trace)
         html_path = output_path.with_suffix(".html")
         svg_path = output_path.with_suffix(".svg")
         curve_path = output_path.with_suffix(".insertion_curve.svg")
@@ -498,6 +584,7 @@ class EdgeAttributionCalibrator:
                     saliency_floor=self.config.saliency_floor,
                 )
                 cached["artifacts"] = {
+                    **cached.get("artifacts", {}),
                     "json": str(output_path.resolve()),
                     "svg": (
                         str(svg_path.resolve())
@@ -623,6 +710,15 @@ class EdgeAttributionCalibrator:
                 raise ValueError(
                     "Recorded input_ids do not match the attribution tokenizer/rendered prompt."
                 )
+        if (
+            self.config.attribution_mode == "correctness-aware"
+            and str(event.get("agent_id", "")) in infer_worker_agents(trace)
+            and parse_worker_answer(str(event.get("output") or ""), benchmark=self._benchmark(trace)) != self._gold_answer(trace)
+        ):
+            return self._process_rescue_event(
+                trace_path, sample_id, trace, event, output_path, configuration,
+                rendered, input_ids,
+            )
         generated_ids, target_id_source = target_ids_from_event(event, tokenizer)
         target_indices = select_target_token_indices(
             tokenizer,
@@ -715,6 +811,101 @@ class EdgeAttributionCalibrator:
             write_event_html(result, html_path)
         return result
 
+    def _process_rescue_event(
+        self, trace_path, sample_id, trace, event, output_path, configuration,
+        original_rendered, original_input_ids,
+    ) -> dict[str, Any]:
+        """Run a local counterfactual without modifying any source trace event."""
+        diagnostic_dir = output_path.parent / "diagnostics" / output_path.stem
+        progress = {"configuration": configuration, "stages": []}
+
+        def save_progress(stage):
+            progress["stages"].append(stage)
+            write_json(diagnostic_dir / "progress.json", progress)
+
+        try:
+            rescue = run_gold_prefix_rescue(
+                self.scorer, event, self._gold_answer(trace),
+                batch_size=self.config.batch_size,
+                max_new_tokens=self._verification_max_tokens(trace),
+                progress_callback=save_progress,
+                benchmark=self._benchmark(trace),
+            )
+        except Exception as error:
+            write_json(diagnostic_dir / "error.json", {
+                "configuration": configuration,
+                "source_event": event,
+                "error": f"{type(error).__name__}: {error}",
+                "diagnostics": getattr(error, "diagnostics", None),
+                "traceback": traceback.format_exc(),
+            })
+            raise
+
+        attribution = rescue["attribution"]
+        peak_ids = list(attribution["selected_region_indices"])
+        edge_ids = peak_ids if rescue["success"] else []
+        spans, edges = rescue["spans"], rescue["edges"]
+        edge_scores = compute_event_edge_scores(
+            spans, edges, edge_ids,
+            min_selected_sentences=self.config.min_selected_sentences,
+            min_sentence_words=self.config.min_sentence_words,
+        )
+        original_ids, original_id_source = target_ids_from_event(event, self.scorer.tokenizer)
+        result = self._base_event_result(
+            trace_path=trace_path, sample_id=sample_id, trace=trace, event=event,
+            configuration=configuration, rendered=original_rendered,
+            input_ids=original_input_ids, generated_ids=original_ids,
+            target_id_source=original_id_source,
+            target_indices=list(range(len(original_ids))),
+            status="rescued" if rescue["success"] else "rescue_failed",
+            incoming_edges=[edge.to_dict() for edge in edges],
+            sentences=[{**span.to_dict(), "selected": span.index in peak_ids} for span in spans],
+            attribution=attribution, edge_scores=edge_scores,
+        )
+        target = rescue["target"]
+        result["target"] = {
+            **target, "mode": "gold_prefix", "id_source": "counterfactual_gold",
+            "selected_ids": [target["generated_ids"][i] for i in target["selected_indices"]],
+        }
+        result["scoring_input"] = {
+            "messages": rescue["event"]["input_messages"],
+            "rendered_prompt": rescue["rendered"],
+            "input_ids": list(rescue["input_ids"]),
+        }
+        result["rescue"] = {
+            "success": bool(rescue["success"]),
+            "full_generation": rescue["full_generation"],
+            "verification": rescue["verification"],
+            "peak_region_indices": peak_ids,
+            "edge_region_indices": edge_ids,
+            "failure_reason": None if rescue["success"] else "peak_verification_incorrect",
+            "scope": "local_intervention_on_frozen_dense_trace",
+        }
+        result["visualization"] = {
+            "title": "Gold-prefix attribution of an incorrect worker",
+            "output_tone": "error",
+            "description": "Orange sentences are the attempted insertion peak; only verified rescue contributes edge importance.",
+            "status_line": f"{result['status']} · peak {len(peak_ids)}/{len(spans)} sentences · original output preserved",
+            "output_section_label": "Original incorrect worker output",
+        }
+        result["attributable_sentence_count"] = len(spans)
+        result["attributable_token_count"] = int(rescue["masks"].max(axis=0).sum())
+        apply_early_stop_sentence_saliency(result, saliency_floor=self.config.saliency_floor)
+        result["artifacts"] = {
+            "json": str(output_path.resolve()),
+            "svg": str(output_path.with_suffix(".svg").resolve()) if self.config.visualizations else None,
+            "visualization": str(output_path.with_suffix(".svg").resolve()) if self.config.visualizations else None,
+            "html": str(output_path.with_suffix(".html").resolve()) if self.config.visualizations else None,
+            "insertion_curve_svg": str(output_path.with_suffix(".insertion_curve.svg").resolve()) if self.config.visualizations else None,
+            "progress_json": str((diagnostic_dir / "progress.json").resolve()),
+        }
+        write_json(output_path, result)
+        if self.config.visualizations:
+            write_event_svg(result, output_path.with_suffix(".svg"))
+            write_event_insertion_curve_svg(result, output_path.with_suffix(".insertion_curve.svg"))
+            write_event_html(result, output_path.with_suffix(".html"))
+        return result
+
     def _base_event_result(
         self,
         *,
@@ -739,7 +930,7 @@ class EdgeAttributionCalibrator:
         while prompt_ids.ndim > 1 and prompt_ids.shape[0] == 1:
             prompt_ids = prompt_ids.squeeze(0)
         prompt_count = int(prompt_ids.numel()) if prompt_ids.ndim == 1 else 0
-        return {
+        result = {
             "schema_version": 1,
             "trace_json": str(trace_path.resolve()),
             "sample_id": sample_id,
@@ -791,6 +982,27 @@ class EdgeAttributionCalibrator:
             "attribution": dict(attribution),
             "edge_scores": list(edge_scores),
         }
+        if self.config.attribution_mode == "correctness-aware":
+            worker = str(event.get("agent_id", "")) in infer_worker_agents(trace)
+            benchmark = self._benchmark(trace)
+            answer = parse_worker_answer(str(event.get("output") or ""), benchmark=benchmark) if worker else None
+            gold = self._gold_answer(trace)
+            result["correctness"] = {
+                "gold_answer": gold,
+                "original_decision": answer,
+                "decision_valid": answer is not None if worker else None,
+                "original_correct": answer == gold if worker else None,
+                "route": (
+                    "reviewer_diagnostic" if not worker else
+                    "no_attributable_input" if not event.get("incoming") else
+                    "original" if answer == gold else "gold_prefix"
+                ),
+            }
+            if benchmark == "gsm8k":
+                result["correctness"]["original_answer"] = result["correctness"].pop("original_decision")
+                result["correctness"]["answer_valid"] = result["correctness"].pop("decision_valid")
+                result["correctness"]["answer_field"] = "The answer is <number>"
+        return result
 
     def attribute(self) -> dict[str, Any]:
         """Attribute all eligible events and write per-sample matrices/manifest."""
@@ -812,7 +1024,10 @@ class EdgeAttributionCalibrator:
             "samples": [],
             "skipped_incorrect": [],
             "failures": [],
+            "complete": False,
+            "aggregation_complete": False,
         }
+        write_json(self.output_dir / "manifest.json", manifest)
         for trace_path in trace_paths:
             trace = load_json(trace_path)
             sample_id = self._sample_name(trace_path, trace)
@@ -919,6 +1134,7 @@ class EdgeAttributionCalibrator:
                         ),
                     }
                 )
+                write_json(self.output_dir / "manifest.json", manifest)
             except Exception as error:
                 manifest["failures"].append(
                     {
@@ -931,6 +1147,7 @@ class EdgeAttributionCalibrator:
                 if not self.config.keep_going:
                     write_json(self.output_dir / "manifest.json", manifest)
                     raise
+        manifest["complete"] = bool(manifest["samples"]) and not manifest["failures"]
         write_json(self.output_dir / "manifest.json", manifest)
         if manifest["failures"]:
             raise RuntimeError(
@@ -970,6 +1187,7 @@ class EdgeAttributionCalibrator:
                 curve_path = event_path.with_suffix(".insertion_curve.svg")
                 html_path = event_path.with_suffix(".html")
                 result["artifacts"] = {
+                    **result.get("artifacts", {}),
                     "json": str(event_path.resolve()),
                     "svg": str(svg_path.resolve()),
                     "visualization": str(svg_path.resolve()),
@@ -1042,7 +1260,23 @@ class EdgeAttributionCalibrator:
             paths = sorted(Path(path) for path in sample_matrix_paths)
         if not paths:
             raise ValueError("No sample_edge_matrices.json files were provided")
+        manifest_path = self.output_dir / "manifest.json"
+        manifest = load_json(manifest_path) if manifest_path.exists() else None
+        if manifest is not None:
+            manifest["aggregation_complete"] = False
+            manifest.pop("aggregate_sha256", None)
+            write_json(manifest_path, manifest)
         sample_matrices = [load_json(path) for path in paths]
+        selection_path = self._trace_root().parent / "selection_manifest.json"
+        if selection_path.exists():
+            selection = load_json(selection_path)
+            expected = {int(item["sample_index"]) for item in selection["samples"]}
+            actual = [int(matrix["sample_index"]) for matrix in sample_matrices]
+            if len(actual) != len(expected) or set(actual) != expected:
+                raise ValueError("Aggregate sample matrices do not match the frozen calibration selection")
+            for item in selection["samples"]:
+                if hashlib.sha256(Path(item["trace_json"]).read_bytes()).hexdigest() != item["sha256"]:
+                    raise ValueError("A source trace changed after calibration selection was frozen")
         legacy_paths = [
             path
             for path, matrix in zip(paths, sample_matrices)
@@ -1054,14 +1288,28 @@ class EdgeAttributionCalibrator:
                 "formal calibration aggregate: "
                 + ", ".join(str(path) for path in legacy_paths)
             )
-        aggregate = aggregate_sample_matrices(sample_matrices)
+        for matrix in sample_matrices:
+            mode = (matrix.get("attribution_configuration") or {}).get("attribution_mode", "original")
+            if mode != self.config.attribution_mode:
+                raise ValueError("Cached sample attribution mode differs from the requested mode")
+            if mode == "correctness-aware":
+                selection = matrix.get("selection_configuration") or {}
+                if (selection.get("node_scope") != "all" or selection.get("event_limit") is not None
+                        or selection.get("event_ids") is not None):
+                    raise ValueError("Formal correctness-aware aggregation requires every worker and reviewer")
+                index_path = matrix.get("node_attribution_index")
+                if not index_path or not load_json(index_path).get("complete"):
+                    raise ValueError("Formal correctness-aware aggregation requires complete node artifacts")
+        aggregate = aggregate_sample_matrices(
+            sample_matrices, aggregation_scope=self.config.aggregation_scope,
+        )
         if not str(aggregate.get("run_fingerprint") or ""):
             raise ValueError(
                 "Schema-v1 sample matrices are missing a run fingerprint; "
                 "refusing to publish an unbound policy."
             )
         aggregate["calibration"] = {
-            "source": "verified-correct traces only",
+            "source": "all completed calibration traces" if self.config.aggregation_scope == "all" else "verified-correct traces only",
             "run_dir": str(self.run_dir.resolve()),
             "sample_matrix_files": [str(path.resolve()) for path in paths],
         }
@@ -1089,6 +1337,12 @@ class EdgeAttributionCalibrator:
             # Validate the on-disk public policy contract before publishing it.
             policies[metric] = RoundPolicy.from_dict(payload)
             write_json(self.output_dir / f"pruned_policy_{metric}.json", payload)
+        if manifest is not None:
+            manifest["aggregation_complete"] = True
+            manifest["aggregate_sha256"] = hashlib.sha256(
+                (self.output_dir / "aggregate_edge_matrices.json").read_bytes()
+            ).hexdigest()
+            write_json(manifest_path, manifest)
         return {"aggregate": aggregate, "policies": policies}
 
     def run(
@@ -1122,7 +1376,7 @@ class EdgeAttributionCalibrator:
             manifest_path = self.output_dir / "manifest.json"
             if manifest_path.exists():
                 manifest = load_json(manifest_path)
-                if manifest.get("failures"):
+                if manifest.get("failures") or manifest.get("complete") is False:
                     raise ValueError(
                         "The latest attribution manifest contains failures; "
                         "refusing to publish a partial formal aggregate."
@@ -1137,10 +1391,13 @@ class EdgeAttributionCalibrator:
                             "The latest manifest has no successful sample matrices"
                         )
             aggregation = self.aggregate(paths)
+            if manifest_path.exists():
+                manifest = load_json(manifest_path)
             return {"manifest": manifest, **aggregation}
 
         manifest = self.attribute()
         if attribute_only:
             return {"manifest": manifest, "aggregate": None, "policies": {}}
         paths = [Path(item["sample_matrix"]) for item in manifest["samples"]]
-        return {"manifest": manifest, **self.aggregate(paths)}
+        aggregation = self.aggregate(paths)
+        return {"manifest": load_json(self.output_dir / "manifest.json"), **aggregation}

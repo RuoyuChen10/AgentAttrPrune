@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -40,6 +41,8 @@ from experiments_attrprune.common import (
     hf_model_reference,
     load_json,
     resolve_run_dir,
+    reviewer_agent_ids_from_config,
+    validate_prompt_contract,
     worker_specs_from_config,
     write_json,
 )
@@ -101,6 +104,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=1,
+        help=(
+            "Maximum concurrent questions and HF generation batch size. "
+            "1 preserves serial inference; larger values require temperature=0. "
+            "Batched GPU arithmetic may change greedy outputs."
+        ),
+    )
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -193,6 +206,7 @@ def _load_run_config(paths: ExperimentPaths, args: argparse.Namespace) -> dict:
             f"configured={configured_benchmark!r}, "
             f"requested={requested_benchmark!r}"
         )
+    validate_prompt_contract(config, benchmark=configured_benchmark)
     configured_split = str((config.get("splits") or {}).get("evaluation", ""))
     if configured_split != args.split:
         raise ValueError(
@@ -309,6 +323,7 @@ def _evaluation_state(
     seed: int,
     save_traces: bool,
     sample_indices: Sequence[int] | None = None,
+    eval_batch_size: int = 1,
 ) -> dict[str, Any]:
     state = {
         "schema_version": 1,
@@ -324,6 +339,7 @@ def _evaluation_state(
         "dataset_size": dataset_size,
         "seed": seed,
         "save_traces": save_traces,
+        "eval_batch_size": eval_batch_size,
     }
     if sample_indices is not None:
         state["sample_indices"] = [int(index) for index in sample_indices]
@@ -338,6 +354,8 @@ def _ensure_evaluation_state(
 ) -> Path:
     if path.is_file():
         current = load_json(path)
+        # Evaluations written before batching was introduced were serial.
+        current.setdefault("eval_batch_size", 1)
         if current != dict(expected):
             differing = sorted(
                 key
@@ -454,6 +472,9 @@ def _trace_final(result: Any, *, gold: str, parsed: str, correct: bool) -> dict:
 
 
 async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
+    eval_batch_size = int(getattr(args, "eval_batch_size", 1))
+    if eval_batch_size < 1:
+        raise ValueError("--eval-batch-size must be positive")
     benchmark = str(getattr(args, "benchmark", "mmlu")).lower()
     definition = benchmark_definition(benchmark)
     requested_data_dir = getattr(args, "data_dir", None)
@@ -480,6 +501,11 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     )
     paths = ExperimentPaths(Path(run_dir))
     config = _load_run_config(paths, args)
+    if eval_batch_size > 1 and float(config["decoding"]["temperature"]) != 0.0:
+        raise ValueError(
+            "--eval-batch-size > 1 requires temperature=0; concurrent sampling "
+            "would change the per-sample random-number stream. Use batch size 1."
+        )
     configured_dataset = config.get("dataset") or {}
     configured_data_dir = configured_dataset.get("data_root") or configured_dataset.get(
         "requested_data_dir"
@@ -565,6 +591,7 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         seed=int(args.seed),
         save_traces=bool(args.save_traces),
         sample_indices=selected_indices if exact_sample_indices else None,
+        eval_batch_size=eval_batch_size,
     )
     _ensure_evaluation_state(
         state_path,
@@ -625,6 +652,10 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "temperature": float(decoding["temperature"]),
             "max_new_tokens": int(decoding["max_new_tokens"]),
         }
+        if callable(getattr(definition.prompt_set, "prepare_reviewer_agent_ids", None)):
+            graph_kwargs["reviewer_agent_ids"] = reviewer_agent_ids_from_config(
+                config
+            )
         if benchmark != "mmlu":
             graph_kwargs["prompt_set"] = definition.prompt_set
         graph = MultiAgentGraph(
@@ -633,14 +664,19 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             **graph_kwargs,
         )
 
-    indices = tqdm(
-        pending_indices,
+    progress = tqdm(
         total=len(selected_indices),
         initial=resumed_samples,
         desc=f"{args.mode} {benchmark} {split} evaluation",
     )
-    for sample_index in indices:
-        set_reproducible(args.seed + sample_index)
+    invocation_started_at = time.perf_counter()
+    last_checkpoint_at = invocation_started_at
+    common_edge_counts = _common_edge_counts(list(checkpoint_records.values()))
+
+    async def evaluate_sample(sample_index: int) -> None:
+        nonlocal last_checkpoint_at, common_edge_counts
+        if eval_batch_size == 1:
+            set_reproducible(args.seed + sample_index)
         record = dataset[sample_index]
         sample = dataset.record_to_sample(record)
         trace_path = (
@@ -655,6 +691,7 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                     "phase": "evaluation",
                     "evaluation_mode": args.mode,
                     "evaluation_name": evaluation_name or args.mode,
+                    "eval_batch_size": eval_batch_size,
                     "sample_index": sample_index,
                 },
                 sample=sample,
@@ -674,16 +711,16 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         is_correct = bool(outcome["correct"])
         metrics = _mapping(result.metrics)
         edge_counts = _mapping(result.edge_counts)
-        existing_edge_counts = _common_edge_counts(
-            list(checkpoint_records.values())
-        )
-        if existing_edge_counts and edge_counts != existing_edge_counts:
+        if common_edge_counts and edge_counts != common_edge_counts:
             raise RuntimeError("Graph edge counts changed between evaluation samples")
+        common_edge_counts = edge_counts
 
         if recorder is not None:
             recorder.write(
                 _trace_final(result, gold=gold, parsed=parsed, correct=is_correct)
             )
+        completed_at = time.perf_counter()
+        sample_elapsed = completed_at - sample_started_at
         checkpoint_records[sample_index] = {
             "sample_index": sample_index,
             "subject": str(sample.get("subject", "")),
@@ -694,7 +731,14 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "output": str(result.final_answer),
             "metrics": metrics,
             "edge_counts": edge_counts,
-            "sample_elapsed_seconds": time.perf_counter() - sample_started_at,
+            "sample_elapsed_seconds": sample_elapsed,
+            # Each completion owns the wall interval since the last checkpoint.
+            # These intervals do not overlap, even when sample latencies do.
+            "evaluation_elapsed_seconds": (
+                completed_at - last_checkpoint_at
+                if eval_batch_size > 1
+                else sample_elapsed
+            ),
             "evaluation_details": outcome.get("details") or {},
             "trace_json": str(trace_path) if recorder is not None else None,
         }
@@ -702,6 +746,37 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             predictions_path,
             [checkpoint_records[index] for index in sorted(checkpoint_records)],
         )
+        last_checkpoint_at = completed_at
+        progress.update(1)
+
+    batching = (
+        llm.async_batching(eval_batch_size)
+        if pending_indices and eval_batch_size > 1
+        else nullcontext()
+    )
+    try:
+        async with batching:
+            for offset in range(0, len(pending_indices), eval_batch_size):
+                if eval_batch_size == 1:
+                    await evaluate_sample(pending_indices[offset])
+                    continue
+                # Keep cohorts bounded, and preserve ordering inside each graph.
+                # A completed sample checkpoints immediately, independently of
+                # slower samples in its cohort.
+                tasks = [
+                    asyncio.create_task(evaluate_sample(index))
+                    for index in pending_indices[offset : offset + eval_batch_size]
+                ]
+                try:
+                    await asyncio.gather(*tasks)
+                except BaseException:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
+    finally:
+        progress.close()
+    invocation_elapsed = time.perf_counter() - invocation_started_at
 
     missing_indices = [
         sample_index
@@ -737,11 +812,23 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         float(_mapping(record.get("metrics")).get("elapsed_seconds", 0.0))
         for record in records
     )
-    elapsed = sum(
+    sample_elapsed_sum = sum(
         float(
             record.get(
                 "sample_elapsed_seconds",
                 _mapping(record.get("metrics")).get("elapsed_seconds", 0.0),
+            )
+        )
+        for record in records
+    )
+    elapsed = sum(
+        float(
+            record.get(
+                "evaluation_elapsed_seconds",
+                record.get(
+                    "sample_elapsed_seconds",
+                    _mapping(record.get("metrics")).get("elapsed_seconds", 0.0),
+                ),
             )
         )
         for record in records
@@ -756,6 +843,10 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         )
     )
     predictions_path = _write_jsonl_atomic(predictions_path, records)
+    batch_metrics = [_mapping(record.get("metrics")) for record in records]
+    batch_recorded_samples = sum(
+        "batch_metadata_calls" in metrics for metrics in batch_metrics
+    )
     summary = {
         "schema_version": 1,
         "run_fingerprint": config["fingerprint"],
@@ -774,6 +865,27 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "prompt_tokens": prompt_tokens,
         "generated_tokens": generated_tokens,
         "elapsed_seconds": elapsed,
+        "sample_elapsed_seconds_sum": sample_elapsed_sum,
+        "invocation_elapsed_seconds": invocation_elapsed,
+        "eval_batch_size": eval_batch_size,
+        "generation_batching": {
+            "configured_max_batch_size": eval_batch_size,
+            "recorded_samples": batch_recorded_samples,
+            "samples_without_batch_metadata": len(records) - batch_recorded_samples,
+            "recorded_calls": sum(
+                int(metrics.get("batch_metadata_calls", 0)) for metrics in batch_metrics
+            ),
+            "oom_fallback_samples": sum(
+                int(metrics.get("oom_fallback_calls", 0)) > 0 for metrics in batch_metrics
+            ),
+            "oom_fallback_calls": sum(
+                int(metrics.get("oom_fallback_calls", 0)) for metrics in batch_metrics
+            ),
+            "max_oom_split_depth": max(
+                (int(metrics.get("oom_max_split_depth", 0)) for metrics in batch_metrics),
+                default=0,
+            ),
+        },
         "graph_elapsed_seconds": graph_elapsed,
         "retained_edges": retained_edges,
         "candidate_edges": candidate_edges,

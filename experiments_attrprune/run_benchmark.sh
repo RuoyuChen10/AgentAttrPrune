@@ -47,8 +47,12 @@ TEMPERATURE="${TEMPERATURE:-0}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-2048}"
 SEED="${SEED:-0}"
 
+ATTRIBUTION_MODE="${ATTRIBUTION_MODE:-original}"
+AGGREGATION_SCOPE="${AGGREGATION_SCOPE:-correct}"
 ATTR_BATCH_SIZE="${ATTR_BATCH_SIZE:-4}"
 ATTR_SAMPLE_LIMIT="${ATTR_SAMPLE_LIMIT:-}"
+ATTR_EXPECTED_SAMPLE_COUNT="${ATTR_EXPECTED_SAMPLE_COUNT:-}"
+ATTR_EXPECTED_START_INDEX="${ATTR_EXPECTED_START_INDEX:-0}"
 ATTR_EVENT_LIMIT="${ATTR_EVENT_LIMIT:-}"
 ATTR_SAMPLE_SCOPE="${ATTR_SAMPLE_SCOPE:-all}"
 ATTR_NODE_SCOPE="${ATTR_NODE_SCOPE:-all}"
@@ -61,6 +65,7 @@ RESUME="${RESUME:-0}"
 OVERWRITE_ATTRIBUTION="${OVERWRITE_ATTRIBUTION:-0}"
 KEEP_GOING="${KEEP_GOING:-0}"
 SAVE_EVAL_TRACES="${SAVE_EVAL_TRACES:-0}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -78,7 +83,7 @@ Usage:
 
 Stages:
   traces             Dense calibration traces.
-  attribution        Attribute saved traces and aggregate correct-only policies.
+  attribution        Attribute saved traces and aggregate policies (correct-only by default).
   render             Rebuild cached per-node reports.
   aggregate          Rebuild aggregate matrices and policies.
   one-sample         Trace and attribute one calibration sample.
@@ -95,8 +100,14 @@ Important overrides:
   DATA_DIR, RESULTS_ROOT, RUN_NAME, CALIBRATION_SPLIT, EVALUATION_SPLIT,
   CALIBRATION_START_INDEX, CALIBRATION_LIMIT, EVALUATION_LIMIT,
   NUM_WORKERS, NUM_ROUNDS, TEMPERATURE, MAX_NEW_TOKENS, SEED,
+  ATTRIBUTION_MODE=original|correctness-aware, AGGREGATION_SCOPE=correct|all,
+  ATTR_EXPECTED_SAMPLE_COUNT, ATTR_EXPECTED_START_INDEX,
   RESUME=1, OVERWRITE_ATTRIBUTION=1, KEEP_GOING=1,
-  SAVE_EVAL_TRACES=1, DRY_RUN=1.
+  SAVE_EVAL_TRACES=1, EVAL_BATCH_SIZE=1, DRY_RUN=1.
+
+Evaluation batching:
+  EVAL_BATCH_SIZE>1 batches independent questions with greedy decoding only.
+  Default 1 preserves serial execution; changing it requires a new evaluation.
 
 HumanEval executes model-generated Python in a time/memory-limited subprocess.
 The evaluator is intended for trusted local benchmark runs, not hostile code.
@@ -164,6 +175,8 @@ run_attribution() {
   local args=(
     -m experiments_attrprune.attribute_edges
     "${COMMON_ARGS[@]}"
+    --attribution-mode "${ATTRIBUTION_MODE}"
+    --aggregation-scope "${AGGREGATION_SCOPE}"
     --target-mode all
     --score-type logit
     --score-reduction sum
@@ -177,6 +190,9 @@ run_attribution() {
     --min-sentence-words 4
     --policy-pruning-rate "${POLICY_PRUNING_RATE}"
   )
+  if [[ -n "${ATTR_EXPECTED_SAMPLE_COUNT}" ]]; then
+    args+=(--expected-sample-count "${ATTR_EXPECTED_SAMPLE_COUNT}" --expected-start-index "${ATTR_EXPECTED_START_INDEX}")
+  fi
   if [[ -n "${ATTR_SAMPLE_LIMIT}" ]]; then
     args+=(--sample-limit "${ATTR_SAMPLE_LIMIT}")
   fi
@@ -200,9 +216,15 @@ run_attribution() {
 
 run_aggregate() {
   common_args
+  local selection_args=()
+  if [[ -n "${ATTR_EXPECTED_SAMPLE_COUNT}" ]]; then
+    selection_args+=(--expected-sample-count "${ATTR_EXPECTED_SAMPLE_COUNT}" --expected-start-index "${ATTR_EXPECTED_START_INDEX}")
+  fi
   run_cmd "${PYTHON_CMD[@]}" -m experiments_attrprune.attribute_edges \
-    "${COMMON_ARGS[@]}" \
+    "${COMMON_ARGS[@]}" "${selection_args[@]}" \
     --policy-pruning-rate "${POLICY_PRUNING_RATE}" \
+    --attribution-mode "${ATTRIBUTION_MODE}" \
+    --aggregation-scope "${AGGREGATION_SCOPE}" \
     --aggregate-only
 }
 
@@ -211,6 +233,8 @@ run_render() {
   run_cmd "${PYTHON_CMD[@]}" -m experiments_attrprune.attribute_edges \
     "${COMMON_ARGS[@]}" \
     --saliency-floor "${SALIENCY_FLOOR}" \
+    --attribution-mode "${ATTRIBUTION_MODE}" \
+    --aggregation-scope "${AGGREGATION_SCOPE}" \
     --render-only
 }
 
@@ -223,6 +247,7 @@ run_evaluation() {
     --mode "${mode}"
     --split "${EVALUATION_SPLIT}"
     --limit "${EVALUATION_LIMIT}"
+    --eval-batch-size "${EVAL_BATCH_SIZE}"
   )
   if is_true "${SAVE_EVAL_TRACES}"; then
     args+=(--save-traces)

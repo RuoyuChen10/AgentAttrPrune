@@ -96,6 +96,13 @@ def build_comparison(run_dir: Path) -> dict:
         field: summaries[dense_name].get(field) for field in selection_fields
     }
     for name in (binary_name, token_ratio_name):
+        if summaries[name].get("eval_batch_size", 1) != summaries[dense_name].get(
+            "eval_batch_size", 1
+        ):
+            raise ValueError(
+                f"{name} eval_batch_size differs from {dense_name}; "
+                "use the same inference batching for policy comparisons"
+            )
         selection = {field: summaries[name].get(field) for field in selection_fields}
         if selection != dense_selection:
             raise ValueError(
@@ -120,6 +127,7 @@ def build_comparison(run_dir: Path) -> dict:
                 "prompt_tokens": summary["prompt_tokens"],
                 "generated_tokens": summary["generated_tokens"],
                 "elapsed_seconds": summary["elapsed_seconds"],
+                "eval_batch_size": summary.get("eval_batch_size", 1),
                 "retained_edges": summary["retained_edges"],
                 "candidate_edges": summary["candidate_edges"],
                 "edge_retention": summary["edge_retention"],
@@ -150,6 +158,7 @@ def build_comparison(run_dir: Path) -> dict:
             "same_workers_and_roles": True,
             "same_rounds": True,
             "same_decoding": True,
+            "same_eval_batch_size": True,
             "same_evaluation_split": True,
             "same_evaluation_selection": True,
             "same_graph_executor": True,

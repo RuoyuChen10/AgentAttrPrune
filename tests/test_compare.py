@@ -90,3 +90,16 @@ def test_compare_rejects_different_candidate_topology(tmp_path):
 
     with pytest.raises(ValueError, match="candidate topology differs"):
         build_comparison(tmp_path)
+
+
+def test_compare_rejects_mixed_inference_batching(tmp_path):
+    _comparison_run(tmp_path)
+    path = tmp_path / "evaluation/token_ratio_val/evaluation_summary.json"
+    summary = json.loads(path.read_text(encoding="utf-8"))
+    summary["eval_batch_size"] = 4
+    write_json(path, summary)
+    with pytest.raises(ValueError, match="eval_batch_size differs"):
+        build_comparison(tmp_path)
+    summary["eval_batch_size"] = 1
+    write_json(path, summary)
+    assert build_comparison(tmp_path)["fairness_contract"]["same_eval_batch_size"]

@@ -4,6 +4,8 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
+from .reviewer_ids import AnonymousReviewerIds
+
 
 WORKER_ROLES = (
     ("math_solver", "Math Solver"),
@@ -40,8 +42,10 @@ def _incoming_text(items: Sequence[Mapping[str, Any]]) -> str:
     )
 
 
-class GSM8KPromptSet:
+class GSM8KPromptSet(AnonymousReviewerIds):
     """Prompts shared by dense and attribution-pruned GSM8K runs."""
+
+    VERSION = "gsm8k_v2_random_reviewer_ids"
 
     @staticmethod
     def get_analyze_constraint(role: str) -> str:
@@ -102,7 +106,8 @@ Do not put units or other text after the number.
         worker_outputs: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, str]]:
         outputs = "\n\n".join(
-            f"{item['agent_id']}: {item['output']}" for item in worker_outputs
+            f"{item['reviewer_agent_id']}: {item['output']}"
+            for item in worker_outputs
         )
         return [
             {

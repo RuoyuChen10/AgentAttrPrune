@@ -463,6 +463,57 @@ def test_incorrect_trace_is_not_a_verified_calibration_sample():
         aggregate_sample_matrices([incorrect])
 
 
+def test_all_sample_aggregation_counts_failed_rescue_as_observed_zero():
+    correct = build_sample_matrices(_trace(), [_event_result(ratio=0.8)])
+    failed = build_sample_matrices(
+        _trace(correct=False), [_event_result(binary=0, ratio=0.0)]
+    )
+
+    aggregate = aggregate_sample_matrices([correct, failed], aggregation_scope="all")
+
+    assert aggregate["aggregation_scope"] == "all"
+    assert aggregate["num_aggregated_samples"] == 2
+    assert aggregate["num_correct_samples"] == 1
+    spatial = aggregate["metrics"]["token_ratio"]["spatial"]
+    assert spatial["opportunity_count"][0][0][1] == 2
+    assert spatial["conditional_mean"][0][0][1] == pytest.approx(0.4)
+    assert failed["correct_verified"] is False
+
+    legacy = aggregate_sample_matrices([correct, failed])
+    assert legacy["aggregation_scope"] == "correct"
+    assert legacy["num_aggregated_samples"] == legacy["num_correct_samples"] == 1
+    assert legacy["metrics"]["token_ratio"]["spatial"]["conditional_mean"][0][0][1] == 0.8
+
+
+def test_all_sample_aggregation_accepts_all_incorrect_and_preserves_metadata():
+    matrix = build_sample_matrices(
+        _trace(correct=False), [_event_result(binary=0, ratio=0.0)]
+    )
+    matrix["attribution_configuration"] = {"attribution_mode": "correctness-aware"}
+    aggregate = aggregate_sample_matrices([matrix], aggregation_scope="all")
+    policy = build_pruned_masks(aggregate, metric="token_ratio", pruning_rate=0)
+
+    assert aggregate["num_aggregated_samples"] == 1
+    assert aggregate["num_correct_samples"] == 0
+    assert policy["calibration_num_aggregated_samples"] == 1
+    assert policy["calibration_num_correct_samples"] == 0
+    assert policy["calibration_aggregation_scope"] == "all"
+    assert policy["calibration_attribution_mode"] == "correctness-aware"
+    assert policy["masks"]["spatial"][0][0][1] == 1
+    with pytest.raises(ValueError, match="aggregation_scope"):
+        aggregate_sample_matrices([matrix], aggregation_scope="wrong")
+
+
+def test_all_sample_aggregation_rejects_mixed_mode_in_incorrect_sample():
+    correct = build_sample_matrices(_trace(), [_event_result()])
+    incorrect = build_sample_matrices(_trace(correct=False), [_event_result()])
+    correct["attribution_configuration"] = {"attribution_mode": "correctness-aware"}
+    incorrect["attribution_configuration"] = {"attribution_mode": "original"}
+
+    with pytest.raises(ValueError, match="attribution configuration"):
+        aggregate_sample_matrices([correct, incorrect], aggregation_scope="all")
+
+
 def test_spatial_policy_projects_cyclic_candidate_union_by_importance():
     zeros = [[[0.0, 0.0], [0.0, 0.0]]]
     aggregate = {

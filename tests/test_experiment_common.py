@@ -8,11 +8,14 @@ import pytest
 from experiments_attrprune.common import (
     build_run_config,
     completed_attempt_indices,
+    config_fingerprint,
     dataset_identities_match,
     ensure_run_config,
     mmlu_data_identity,
     normalize_answer,
     resolve_run_dir,
+    reviewer_agent_ids_from_config,
+    validate_prompt_contract,
 )
 
 
@@ -28,6 +31,24 @@ def test_run_config_fingerprint_is_stable_and_rejects_mixing(tmp_path):
     path = tmp_path / "run_config.json"
     assert ensure_run_config(path, config)["fingerprint"] == config["fingerprint"]
     assert ensure_run_config(path, dict(config))["fingerprint"] == config["fingerprint"]
+    assert config["prompt"]["prompt_set"] == "MMLUPromptSet"
+    assert config["prompt"]["version"] == "mmlu_v2_random_reviewer_ids"
+    aliases = config["prompt"]["reviewer_agent_ids"]
+    assert set(aliases) == {worker["agent_id"] for worker in config["workers"]}
+    assert len(set(aliases.values())) == 5
+    assert all(len(alias) == 4 and alias.isalnum() for alias in aliases.values())
+    assert reviewer_agent_ids_from_config(config) == aliases
+
+    recreated = build_run_config(
+        model_name="/models/Qwen3-8B",
+        num_workers=5,
+        num_rounds=2,
+        temperature=0.0,
+        max_new_tokens=256,
+        seed=0,
+        reviewer_agent_ids=aliases,
+    )
+    assert recreated == config
 
     changed = build_run_config(
         model_name="/models/Qwen3-8B",
@@ -36,6 +57,7 @@ def test_run_config_fingerprint_is_stable_and_rejects_mixing(tmp_path):
         temperature=0.0,
         max_new_tokens=256,
         seed=0,
+        reviewer_agent_ids=aliases,
     )
     with pytest.raises(ValueError, match="configuration mismatch"):
         ensure_run_config(path, changed)
@@ -58,6 +80,24 @@ def test_resume_manifest_skips_correct_and_incorrect_completed_samples(tmp_path)
         "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
     )
     assert completed_attempt_indices(path) == {1, 2}
+
+
+def test_current_mmlu_generation_rejects_a_legacy_prompt_contract():
+    current = build_run_config(
+        model_name="/models/Qwen3-8B",
+        num_workers=5,
+        num_rounds=2,
+        temperature=0.0,
+        max_new_tokens=256,
+        seed=0,
+    )
+    validate_prompt_contract(current)
+
+    legacy = deepcopy(current)
+    legacy.pop("prompt")
+    legacy["fingerprint"] = config_fingerprint(legacy)
+    with pytest.raises(ValueError, match="prompt contract"):
+        validate_prompt_contract(legacy)
 
 
 def test_default_output_is_under_agentattrprune_results(tmp_path):

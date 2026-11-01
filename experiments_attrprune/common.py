@@ -173,6 +173,80 @@ def worker_metadata(
     ]
 
 
+def prompt_contract(benchmark: str) -> dict[str, str] | None:
+    """Return the versioned prompt identity that must match formal runs."""
+
+    prompt_set = benchmark_definition(benchmark).prompt_set
+    version = getattr(prompt_set, "VERSION", None)
+    if version is None:
+        return None
+    return {
+        "prompt_set": prompt_set.__name__,
+        "version": str(version),
+    }
+
+
+def validate_prompt_contract(
+    config: Mapping[str, Any],
+    *,
+    benchmark: str | None = None,
+) -> None:
+    """Reject generation with a run created under another prompt version."""
+
+    benchmark_name = str(benchmark or config.get("benchmark", "mmlu")).lower()
+    expected = prompt_contract(benchmark_name)
+    if expected is None:
+        return
+    actual = config.get("prompt")
+    if not isinstance(actual, Mapping):
+        raise ValueError(
+            "Run prompt contract does not match the current implementation: "
+            f"stored={actual!r}, current={expected!r}. Choose a new RUN_NAME "
+            "and rerun calibration before evaluation."
+        )
+    workers = list(config.get("workers") or [])
+    prepare_reviewer_ids = getattr(
+        benchmark_definition(benchmark_name).prompt_set,
+        "prepare_reviewer_agent_ids",
+        None,
+    )
+    expected_full: dict[str, Any] = dict(expected)
+    if prepare_reviewer_ids is not None:
+        raw_aliases = actual.get("reviewer_agent_ids")
+        if not isinstance(raw_aliases, Mapping):
+            raise ValueError(
+                "Run prompt contract has no saved reviewer_agent_ids mapping. "
+                "Choose a new RUN_NAME and rerun calibration before evaluation."
+            )
+        worker_ids = [str(worker["agent_id"]) for worker in workers]
+        try:
+            aliases = prepare_reviewer_ids(worker_ids, raw_aliases)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"Run prompt contract has invalid reviewer_agent_ids: {error}"
+            ) from error
+        expected_full["reviewer_agent_ids"] = aliases
+    if dict(actual) != expected_full:
+        raise ValueError(
+            "Run prompt contract does not match the current implementation: "
+            f"stored={dict(actual)!r}, current={expected_full!r}. Choose a new "
+            "RUN_NAME and rerun calibration before evaluation."
+        )
+
+
+def reviewer_agent_ids_from_config(config: Mapping[str, Any]) -> dict[str, str]:
+    """Load the validated runtime IDs shown to a versioned final reviewer."""
+
+    validate_prompt_contract(config)
+    prompt = config.get("prompt")
+    if not isinstance(prompt, Mapping):
+        return {}
+    aliases = prompt.get("reviewer_agent_ids")
+    if not isinstance(aliases, Mapping):
+        return {}
+    return {str(agent_id): str(alias) for agent_id, alias in aliases.items()}
+
+
 def canonical_model_name(value: str | Path) -> str:
     value = str(value)
     for prefix in ("local:", "hf:"):
@@ -200,6 +274,7 @@ def build_run_config(
     evaluation_split: str = "val",
     dataset_identity: Mapping[str, Any] | None = None,
     benchmark: str = "mmlu",
+    reviewer_agent_ids: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if num_rounds < 1:
         raise ValueError("num_rounds must be positive")
@@ -207,12 +282,14 @@ def build_run_config(
         raise ValueError("temperature must be non-negative")
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be positive")
-    benchmark = benchmark_definition(benchmark).name
+    definition = benchmark_definition(benchmark)
+    benchmark = definition.name
+    workers = worker_metadata(num_workers, benchmark=benchmark)
     config: dict[str, Any] = {
         "schema_version": 1,
         "benchmark": benchmark,
         "model_name": canonical_model_name(model_name),
-        "workers": worker_metadata(num_workers, benchmark=benchmark),
+        "workers": workers,
         "num_rounds": num_rounds,
         "decoding": {
             "temperature": temperature,
@@ -231,6 +308,25 @@ def build_run_config(
             "reviewer": "all final-round workers to dense FinalRefer",
         },
     }
+    configured_prompt = prompt_contract(benchmark)
+    if configured_prompt is not None:
+        prepare_reviewer_ids = getattr(
+            definition.prompt_set, "prepare_reviewer_agent_ids", None
+        )
+        if prepare_reviewer_ids is not None:
+            configured_prompt["reviewer_agent_ids"] = prepare_reviewer_ids(
+                [str(worker["agent_id"]) for worker in workers],
+                reviewer_agent_ids,
+            )
+        elif reviewer_agent_ids is not None:
+            raise ValueError(
+                f"{definition.prompt_set.__name__} does not support reviewer_agent_ids"
+            )
+        config["prompt"] = configured_prompt
+    elif reviewer_agent_ids is not None:
+        raise ValueError(
+            f"{definition.prompt_set.__name__} does not support reviewer_agent_ids"
+        )
     if dataset_identity is not None:
         config["dataset"] = dict(dataset_identity)
     config["fingerprint"] = config_fingerprint(config)

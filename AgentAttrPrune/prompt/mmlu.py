@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping, Sequence
 
+from .reviewer_ids import AnonymousReviewerIds
+
 
 WORKER_ROLES = (
     ("knowledgeable_expert", "Knowlegable Expert"),
@@ -57,8 +59,13 @@ You have experience in designing and developing computer software and hardware.
 }
 
 
-class MMLUPromptSet:
+class MMLUPromptSet(AnonymousReviewerIds):
     """Prompts shared by dense and attribution-pruned MMLU runs."""
+
+    # Bump this value whenever the MMLU prompt contract changes. Formal run
+    # configurations include it in their fingerprint so results produced by
+    # different reviewer prompts cannot be resumed into the same run.
+    VERSION = "mmlu_v2_random_reviewer_ids"
 
     @staticmethod
     def get_analyze_constraint(role: str) -> str:
@@ -146,8 +153,12 @@ Decision: <one letter: A, B, C, or D>
         system_prompt = (
             f"{cls.get_decision_role()}.\n {cls.get_decision_constraint()}"
         )
+        # AgentDropout's FinalRefer receives four-character shortuuid source
+        # IDs. Formal runs attach the saved alias to each incoming record; the
+        # real agent_id remains alongside it for trace provenance.
         outputs = "\n\n".join(
-            f"{item['agent_id']}: {item['output']}" for item in worker_outputs
+            f"{item['reviewer_agent_id']}: {item['output']}"
+            for item in worker_outputs
         )
         user_prompt = (
             f"{cls.get_decision_few_shot()} The task is:\n\n {task}.\n "

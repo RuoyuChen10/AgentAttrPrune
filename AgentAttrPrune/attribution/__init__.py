@@ -26,6 +26,7 @@ from AgentAttrPrune.attribution.edge import (
     word_count,
     write_json,
 )
+from AgentAttrPrune.attribution.gold_prefix import GreedyPrefixLogitAttributor
 from AgentAttrPrune.attribution.scoring import TeacherForcedTextScorer
 from AgentAttrPrune.attribution.visualization import (
     write_aggregate_matrix_png,
@@ -41,6 +42,7 @@ __all__ = [
     "EDGE_TYPES",
     "EdgeAttributionCalibrator",
     "GreedyFullScoreAttributor",
+    "GreedyPrefixLogitAttributor",
     "IncomingEdge",
     "IncomingSentenceSpan",
     "METRICS",

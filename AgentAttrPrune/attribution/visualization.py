@@ -106,6 +106,55 @@ def _edge_svg(result: Mapping[str, Any]) -> str:
     return "".join(pieces)
 
 
+def _gold_prefix_curve_svg(result: Mapping[str, Any], width: int, height: int) -> str:
+    """Show the complete ranking, including post-peak decline and deletion."""
+    attr = result["attribution"]
+    curve = attr["curve"]
+    n = len(curve)
+    insertion = [float(attr["baseline_score"])] + [float(row["insertion_score"]) for row in curve]
+    deletion = [float(attr["full_score"])] + [float(row["deletion_score"]) for row in curve]
+    low, high = min(insertion + deletion), max(insertion + deletion)
+    pad = max((high - low) * .12, 1e-4)
+    low, high = low - pad, high + pad
+    left, right, top, bottom = 115, width - 45, 115, height - 175
+
+    def point(step, value):
+        return left + step / max(1, n) * (right - left), bottom - (value - low) / (high - low) * (bottom - top)
+
+    peak = int(attr["best_step"])
+    px, py = point(peak, insertion[peak])
+    success = (result.get("rescue") or {}).get("success")
+    label = "verified correct" if success else "verification failed; incoming edge importance = 0"
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img">',
+        '<title>Complete gold-prefix insertion and deletion curves</title>',
+        '<style>text{font-family:Arial,sans-serif;fill:#111827;font-size:19px}</style>',
+        '<rect width="100%" height="100%" fill="white"/>',
+        '<text x="35" y="42" style="font-size:28px;font-weight:bold">Gold-prefix Insertion / Deletion</text>',
+        f'<text x="35" y="77">{html.escape(str(result.get("sample_id", "")))} · {html.escape(str(result.get("event", {}).get("agent_id", "")))}</text>',
+    ]
+    for tick in range(0, 101, 20):
+        x, _ = point(tick * n / 100, low)
+        parts += [f'<line x1="{x}" y1="{top}" x2="{x}" y2="{bottom}" stroke="#e5e7eb"/>',
+                  f'<text x="{x}" y="{bottom + 30}" text-anchor="middle">{tick}%</text>']
+    for value in np.linspace(low, high, 5):
+        _, y = point(0, value)
+        parts += [f'<line x1="{left}" y1="{y}" x2="{right}" y2="{y}" stroke="#e5e7eb"/>',
+                  f'<text x="{left - 12}" y="{y + 6}" text-anchor="end">{value:.2f}</text>']
+    for values, color in ((insertion, "#ea580c"), (deletion, "#2563eb")):
+        points = " ".join(f"{point(k, value)[0]:.2f},{point(k, value)[1]:.2f}" for k, value in enumerate(values))
+        parts.append(f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="3"/>')
+    parts += [
+        f'<circle cx="{px}" cy="{py}" r="7" fill="#15803d"/>',
+        f'<text x="{(left + right) / 2}" y="{bottom + 63}" text-anchor="middle">Ranked prefix retained (%) · deletion removes that same prefix</text>',
+        '<text x="22" y="300" transform="rotate(-90 22 300)">Raw-logit sum</text>',
+        f'<text x="{left}" y="{height - 77}">Orange: insertion · Blue: deletion · Green: earliest global peak {peak}/{n}</text>',
+        f'<text x="{left}" y="{height - 43}">{html.escape(label)}</text>',
+        '</svg>',
+    ]
+    return "".join(parts)
+
+
 def _insertion_curve_svg(
     result: Mapping[str, Any],
     *,
@@ -113,6 +162,8 @@ def _insertion_curve_svg(
     height: int = 900,
 ) -> str:
     attribution = result.get("attribution") or {}
+    if attribution.get("method") == "exact_greedy_gold_prefix_insertion_maximization":
+        return _gold_prefix_curve_svg(result, width, height)
     curve = list(attribution.get("curve") or [])
     baseline = attribution.get("baseline_score")
     full = attribution.get("full_score")
@@ -505,6 +556,10 @@ def write_event_svg(result: Mapping[str, Any], path: str | Path) -> Path:
     event = result.get("event") or {}
     sample = result.get("sample") or {}
     attribution = result.get("attribution") or {}
+    visualization = result.get("visualization") or {}
+    display_mode = str(visualization.get("display_mode", "attribution"))
+    pruning_mask_mode = display_mode == "pruning_mask"
+    output_tone = str(visualization.get("output_tone", "success"))
     scores = {
         int(item.get("incoming_index", -1)): item
         for item in result.get("edge_scores") or []
@@ -616,6 +671,7 @@ def write_event_svg(result: Mapping[str, Any], path: str | Path) -> Path:
             token_count = len(sentence.get("source_token_indices") or [])
             step = sentence.get("selection_step") or selection_steps.get(sentence_index)
             saliency = sentence.get("saliency")
+            display_badge = str(sentence.get("display_badge") or "")
             add_sentence(
                 str(sentence.get("text") or ""),
                 selected=is_selected,
@@ -625,18 +681,26 @@ def write_event_svg(result: Mapping[str, Any], path: str | Path) -> Path:
                     f"{token_count} source tokens; selected={is_selected}; "
                     f"saliency={saliency}"
                 ),
-                badge=(
-                    f"saliency {float(saliency):.2f} · step {step}"
-                    if is_selected and saliency is not None
-                    else (f"selected · step {step}" if step else "selected")
-                )
-                if is_selected else "",
+                badge=display_badge or (
+                    (
+                        f"saliency {float(saliency):.2f} · step {step}"
+                        if saliency is not None
+                        else (f"selected · step {step}" if step else "selected")
+                    )
+                    if is_selected
+                    else ""
+                ),
                 saliency=float(saliency) if saliency is not None else None,
             )
 
     add_section(
-        "Receiving node output",
-        f"Agent {event.get('agent_id', 'node')} · target text being explained",
+        str(visualization.get("output_section_label", "Receiving node output")),
+        str(
+            visualization.get(
+                "output_section_detail",
+                f"Agent {event.get('agent_id', 'node')} · target text being explained",
+            )
+        ),
     )
     output_chunks = _sentence_chunks((result.get("output") or {}).get("text", ""))
     if not output_chunks:
@@ -669,10 +733,40 @@ def write_event_svg(result: Mapping[str, Any], path: str | Path) -> Path:
         f"round {event.get('round', '?')} · "
         f"{event.get('agent_id', 'node')} ({event.get('role', '')})"
     )
-    status_line = (
-        f"status: {result.get('status', 'unknown')} · "
-        f"stop: {attribution.get('stop_reason', '')} · "
-        f"recovery: {attribution.get('selected_recovery', 'n/a')}"
+    status_line = str(
+        visualization.get(
+            "status_line",
+            f"status: {result.get('status', 'unknown')} · "
+            f"stop: {attribution.get('stop_reason', '')} · "
+            f"recovery: {attribution.get('selected_recovery', 'n/a')}",
+        )
+    )
+    figure_title = str(
+        visualization.get("title", "Selected Incoming-Sentence Attribution")
+    )
+    description = str(
+        visualization.get(
+            "description",
+            "Single-column sentence attribution. Orange intensity shows "
+            "normalized early-stop saliency for selected incoming sentences; "
+            "gray incoming sentences were not selected. Fixed prompt text is "
+            "never attributed.",
+        )
+    )
+    panel_label = str(
+        visualization.get(
+            "panel_label",
+            f"Sentence-level ({selected_ratio:.1%} selected source tokens)",
+        )
+    )
+    selected_low_label = str(
+        visualization.get("selected_low_label", f"{saliency_floor:.1f} later selected")
+    )
+    selected_high_label = str(
+        visualization.get("selected_high_label", "1.0 top1")
+    )
+    unselected_label = str(
+        visualization.get("unselected_label", "unselected / fixed text")
     )
     pieces = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -681,13 +775,8 @@ def write_event_svg(result: Mapping[str, Any], path: str | Path) -> Path:
             f'height="{total_height}" viewBox="0 0 {width} {total_height}" '
             'role="img" aria-labelledby="title description">'
         ),
-        "<title id=\"title\">Selected Incoming-Sentence Attribution</title>",
-        (
-            '<desc id="description">Single-column sentence attribution. '
-            "Orange intensity shows normalized early-stop saliency for selected "
-            "incoming sentences; gray incoming sentences were not selected. "
-            "Fixed prompt text is never attributed.</desc>"
-        ),
+        f'<title id="title">{html.escape(figure_title)}</title>',
+        f'<desc id="description">{html.escape(description)}</desc>',
         (
             '<defs><linearGradient id="saliency-gradient" x1="0%" y1="0%" '
             'x2="100%" y2="0%">'
@@ -708,7 +797,7 @@ def write_event_svg(result: Mapping[str, Any], path: str | Path) -> Path:
         '<rect width="100%" height="100%" fill="#ffffff"/>',
         (
             f'<text id="title-text" x="{left}" y="78" class="main">'
-            "Selected Incoming-Sentence Attribution</text>"
+            f"{html.escape(figure_title)}</text>"
         ),
         (
             f'<text x="{left}" y="128" class="sub">'
@@ -720,36 +809,60 @@ def write_event_svg(result: Mapping[str, Any], path: str | Path) -> Path:
         ),
         (
             f'<text x="{left}" y="238" class="panel">'
-            f"Sentence-level ({selected_ratio:.1%} selected source tokens)</text>"
-        ),
-        (
-            f'<rect x="{left}" y="265" width="430" height="34" rx="8" '
-            'fill="url(#saliency-gradient)" stroke="#c2410c" stroke-width="2"/>'
-            f'<text x="{left}" y="328" class="detail">'
-            f"{saliency_floor:.1f} later selected</text>"
-            f'<text x="{left + 430}" y="328" text-anchor="end" class="detail">'
-            "1.0 top1</text>"
-        ),
-        (
-            f'<rect x="{left + 650}" y="265" width="54" height="38" rx="8" '
-            'fill="#e5e7eb" stroke="#a7afb9" stroke-width="2"/>'
-            f'<text x="{left + 722}" y="296" class="detail">unselected / fixed text</text>'
+            f"{html.escape(panel_label)}</text>"
         ),
     ]
+
+    if pruning_mask_mode:
+        pieces.extend(
+            [
+                (
+                    f'<rect x="{left}" y="265" width="54" height="38" rx="8" '
+                    'fill="#ffffff" stroke="#a7afb9" stroke-width="2"/>'
+                    f'<text x="{left + 72}" y="296" class="detail">'
+                    f"{html.escape(selected_high_label)}</text>"
+                ),
+                (
+                    f'<rect x="{left + 650}" y="265" width="54" height="38" rx="8" '
+                    'fill="#374151" stroke="#111827" stroke-width="2"/>'
+                    f'<text x="{left + 722}" y="296" class="detail">'
+                    f"{html.escape(unselected_label)}</text>"
+                ),
+            ]
+        )
+    else:
+        pieces.extend(
+            [
+                (
+                    f'<rect x="{left}" y="265" width="430" height="34" rx="8" '
+                    'fill="url(#saliency-gradient)" stroke="#c2410c" stroke-width="2"/>'
+                    f'<text x="{left}" y="328" class="detail">'
+                    f"{html.escape(selected_low_label)}</text>"
+                    f'<text x="{left + 430}" y="328" text-anchor="end" class="detail">'
+                    f"{html.escape(selected_high_label)}</text>"
+                ),
+                (
+                    f'<rect x="{left + 650}" y="265" width="54" height="38" rx="8" '
+                    'fill="#e5e7eb" stroke="#a7afb9" stroke-width="2"/>'
+                    f'<text x="{left + 722}" y="296" class="detail">'
+                    f"{html.escape(unselected_label)}</text>"
+                ),
+            ]
+        )
 
     y = 335
     fill_by_tone = {
         "fixed": "#e5e7eb",
         "candidate": "#e5e7eb",
         "empty": "#f1f5f9",
-        "output": "#dcfce7",
+        "output": "#fee2e2" if output_tone == "error" else "#dcfce7",
         "neutral": "#f1f5f9",
     }
     stroke_by_tone = {
         "fixed": "#a7afb9",
         "candidate": "#a7afb9",
         "empty": "#cbd5e1",
-        "output": "#86c99a",
+        "output": "#fca5a5" if output_tone == "error" else "#86c99a",
         "neutral": "#cbd5e1",
     }
     for block in blocks:
@@ -772,23 +885,37 @@ def write_event_svg(result: Mapping[str, Any], path: str | Path) -> Path:
         )
         selected = bool(block["selected"])
         saliency = block.get("saliency")
-        fill = (
-            _saliency_color(
-                float(saliency) if saliency is not None else 1.0,
-                saliency_floor,
-            )
-            if selected
-            else fill_by_tone.get(block["tone"], "#e5e7eb")
+        is_masked = (
+            pruning_mask_mode
+            and block["tone"] == "candidate"
+            and not selected
         )
-        stroke = (
-            _saliency_color(
-                float(saliency) if saliency is not None else 1.0,
-                saliency_floor,
-                stroke=True,
+        if pruning_mask_mode:
+            if is_masked:
+                fill, stroke = "#374151", "#111827"
+            elif block["tone"] == "output":
+                fill = "#fee2e2" if output_tone == "error" else "#dcfce7"
+                stroke = "#fca5a5" if output_tone == "error" else "#86c99a"
+            else:
+                fill, stroke = "#ffffff", "#a7afb9"
+        else:
+            fill = (
+                _saliency_color(
+                    float(saliency) if saliency is not None else 1.0,
+                    saliency_floor,
+                )
+                if selected
+                else fill_by_tone.get(block["tone"], "#e5e7eb")
             )
-            if selected
-            else stroke_by_tone.get(block["tone"], "#a7afb9")
-        )
+            stroke = (
+                _saliency_color(
+                    float(saliency) if saliency is not None else 1.0,
+                    saliency_floor,
+                    stroke=True,
+                )
+                if selected
+                else stroke_by_tone.get(block["tone"], "#a7afb9")
+            )
         pieces.append("<g>")
         pieces.append(f"<title>{html.escape(block['title'])}</title>")
         pieces.append(
@@ -798,15 +925,18 @@ def write_event_svg(result: Mapping[str, Any], path: str | Path) -> Path:
         )
         text_x = left + 28
         text_y = y + sentence_padding + 38
+        masked_fill_attribute = ' style="fill:#f8fafc"' if is_masked else ""
         for line_index, line in enumerate(block["lines"]):
             pieces.append(
                 f'<text x="{text_x}" y="{text_y + line_index * line_height}" '
-                f'class="body">{html.escape(line)}</text>'
+                f'class="body"{masked_fill_attribute}>'
+                f"{html.escape(line)}</text>"
             )
         if block["badge"]:
             pieces.append(
                 f'<text x="{left + content_width - 28}" y="{y + box_height - 18}" '
-                f'text-anchor="end" class="badge">'
+                f'text-anchor="end" class="badge"'
+                f"{masked_fill_attribute}>"
                 f"{html.escape(block['badge'])}</text>"
             )
         pieces.append("</g>")
@@ -860,6 +990,34 @@ def write_event_html(result: Mapping[str, Any], path: str | Path) -> Path:
         input_payload.get("messages", []), ensure_ascii=False, indent=2
     )
     status = str(result.get("status", "unknown"))
+    rescue_sections = ""
+    if result.get("rescue"):
+        rescue = result["rescue"]
+        verification = rescue["verification"]
+        full_generation = rescue["full_generation"]
+        peak = int(attribution["best_step"])
+        peak_diagnostics = (
+            attribution["curve"][peak - 1]["insertion_diagnostics"]
+            if peak else attribution["baseline_diagnostics"]
+        )
+        rescue_sections = (
+            '<section class="card"><h2>Gold-prefix rescue verification</h2>'
+            '<p>Highlighted sentences show the attempted peak subset. A failed verification contributes '
+            'observed zero edge importance. The original dense trace and downstream inputs are unchanged.</p>'
+            f'<p>Target: {html.escape(str(result["target"]["text"]))}; '
+            f'verified correct: {rescue["success"]}; retained: {peak}/{len(attribution["curve"])}.</p>'
+            '<h3>Full-input answer-first generation (diagnostic)</h3>'
+            f'<pre>{html.escape(full_generation["text"])}</pre>'
+            '<h3>Peak-subset generation using the original prompt, without gold supplied</h3>'
+            f'<pre>{html.escape(verification["text"])}</pre>'
+            '<details><summary>Actual verification input</summary>'
+            f'<pre>{html.escape(verification["rendered_prompt"])}</pre></details>'
+            '<details><summary>Answer-first scoring input</summary>'
+            f'<pre>{html.escape(result["scoring_input"]["rendered_prompt"])}</pre></details>'
+            '<details><summary>Peak probability diagnostics (not optimization or stopping criteria)</summary>'
+            f'<pre>{html.escape(json.dumps({"semantics": result["target"].get("probability_semantics"), "peak": peak_diagnostics}, indent=2, ensure_ascii=False))}</pre>'
+            '</details></section>'
+        )
     css = """
 body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;margin:0;
 background:#f8fafc;color:#0f172a}.wrap{max-width:1180px;margin:auto;padding:28px}
@@ -901,6 +1059,7 @@ selected recovery: <strong>{html.escape(str(attribution.get("selected_recovery",
 {_curve_svg(result)}</section>
 <section class="card"><h2>Receiving node output</h2>
 <pre>{html.escape(str(output_payload.get("text", "")))}</pre></section>
+{rescue_sections}
 <section class="card"><details><summary>Complete rendered prompt</summary>
 <pre>{html.escape(str(input_payload.get("rendered_prompt", "")))}</pre></details>
 <details><summary>Complete input messages</summary>
@@ -1019,8 +1178,8 @@ def write_aggregate_matrix_png(
         candidates=candidates,
         agents=list(aggregate["agents"]),
         title=(
-            f"Correct-only aggregate · {metric} {statistic} "
-            f"· n={aggregate.get('num_correct_samples')}"
+            f"{'All-sample' if aggregate.get('aggregation_scope') == 'all' else 'Correct-only'} aggregate · {metric} {statistic} "
+            f"· n={aggregate.get('num_aggregated_samples', aggregate.get('num_correct_samples'))}"
         ),
         path=Path(path),
     )

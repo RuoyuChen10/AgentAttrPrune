@@ -178,6 +178,10 @@ def test_collect_saves_every_trace_and_resume_skips_wrong_too(
     config = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
     assert config["dataset"]["splits"]["dev"]["record_count"] == 1
     assert config["dataset"]["splits"]["val"]["record_count"] == 1
+    aliases = config["prompt"]["reviewer_agent_ids"]
+    assert len(aliases) == 2
+    assert len(set(aliases.values())) == 2
+    assert all(len(alias) == 4 for alias in aliases.values())
 
     resumed = asyncio.run(
         collect_correct.collect(_args(run_dir, data_dir, resume=True))
@@ -189,6 +193,10 @@ def test_collect_saves_every_trace_and_resume_skips_wrong_too(
         .read_text(encoding="utf-8")
         .splitlines()
     ) == 3
+    resumed_config = json.loads(
+        (run_dir / "run_config.json").read_text(encoding="utf-8")
+    )
+    assert resumed_config["prompt"]["reviewer_agent_ids"] == aliases
 
 
 def test_collect_prepares_both_splits_before_dataset_fingerprinting(

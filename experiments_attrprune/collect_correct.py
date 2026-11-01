@@ -36,7 +36,9 @@ from experiments_attrprune.common import (
     default_data_dir,
     ensure_run_config,
     hf_model_reference,
+    load_json,
     load_jsonl,
+    reviewer_agent_ids_from_config,
     resolve_run_dir,
     worker_specs_from_config,
     write_json,
@@ -207,6 +209,14 @@ async def collect(args: argparse.Namespace) -> dict:
         data_dir,
         splits=(split, evaluation_split),
     )
+    reviewer_agent_ids = None
+    supports_reviewer_ids = callable(
+        getattr(definition.prompt_set, "prepare_reviewer_agent_ids", None)
+    )
+    if supports_reviewer_ids and paths.run_config.is_file():
+        reviewer_agent_ids = reviewer_agent_ids_from_config(
+            load_json(paths.run_config)
+        )
     config = build_run_config(
         model_name=args.model_name,
         num_workers=num_workers,
@@ -218,6 +228,7 @@ async def collect(args: argparse.Namespace) -> dict:
         evaluation_split=evaluation_split,
         dataset_identity=data_identity,
         benchmark=benchmark,
+        reviewer_agent_ids=reviewer_agent_ids,
     )
     config = ensure_run_config(paths.run_config, config)
     attempts_path = paths.calibration / "attempts.jsonl"
@@ -239,6 +250,8 @@ async def collect(args: argparse.Namespace) -> dict:
         "temperature": args.temperature,
         "max_new_tokens": args.max_new_tokens,
     }
+    if supports_reviewer_ids:
+        graph_kwargs["reviewer_agent_ids"] = reviewer_agent_ids_from_config(config)
     if benchmark != "mmlu":
         graph_kwargs["prompt_set"] = definition.prompt_set
     graph = MultiAgentGraph(

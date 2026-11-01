@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
+from torch.cuda import OutOfMemoryError
+
 from AgentAttrPrune.agents import AnalyzeAgent, FinalRefer, WorkerSpec
 from AgentAttrPrune.prompt import MMLUPromptSet
 from AgentAttrPrune.pruning import RoundPolicy
@@ -66,6 +68,7 @@ class MultiAgentGraph:
         timeout: float = 600.0,
         max_tries: int = 3,
         reviewer_id: str = "dense_reviewer",
+        reviewer_agent_ids: Mapping[str, str] | None = None,
     ) -> None:
         if num_rounds < 1:
             raise ValueError("num_rounds must be positive")
@@ -99,6 +102,19 @@ class MultiAgentGraph:
         self.timeout = float(timeout)
         self.max_tries = int(max_tries)
         self.reviewer_id = reviewer_id
+        prepare_reviewer_ids = getattr(
+            self.prompt_set, "prepare_reviewer_agent_ids", None
+        )
+        if prepare_reviewer_ids is None:
+            if reviewer_agent_ids is not None:
+                raise ValueError(
+                    "reviewer_agent_ids are not supported by this prompt set"
+                )
+            self.reviewer_agent_ids: dict[str, str] = {}
+        else:
+            self.reviewer_agent_ids = prepare_reviewer_ids(
+                agent_ids, reviewer_agent_ids
+            )
         self.workers = tuple(
             AnalyzeAgent(spec, llm, self.prompt_set) for spec in self.worker_specs
         )
@@ -269,10 +285,13 @@ class MultiAgentGraph:
                     return await asyncio.wait_for(call(), timeout=self.timeout)
             except Exception as error:
                 last_error = error
-                if attempt == self.max_tries:
+                # HFChat recovers batched CUDA OOMs by reducing the physical
+                # generation batch. Once that recovery is exhausted, retrying
+                # the same request here also retains its failed CUDA tensors.
+                if isinstance(error, OutOfMemoryError) or attempt == self.max_tries:
                     break
         raise GraphExecutionError(
-            f"{metadata['agent_id']} failed after {self.max_tries} attempts"
+            f"{metadata['agent_id']} failed after {attempt} attempts"
         ) from last_error
 
     async def run_sample(
@@ -384,6 +403,10 @@ class MultiAgentGraph:
             )
             for output in previous_outputs
         ]
+        for incoming in reviewer_incoming:
+            agent_id = str(incoming["agent_id"])
+            if agent_id in self.reviewer_agent_ids:
+                incoming["reviewer_agent_id"] = self.reviewer_agent_ids[agent_id]
         reviewer_invocation = active_recorder.new_invocation_id()
         reviewer_metadata = {
             "invocation_id": reviewer_invocation,
@@ -432,6 +455,22 @@ class MultiAgentGraph:
             )
         }
         metrics["elapsed_seconds"] = time.perf_counter() - started_at
+        # Keep actual generation batch provenance distinct from the evaluator's
+        # configured maximum number of concurrent samples. Older checkpoints
+        # have no such metadata; absence must not be interpreted as batch=4.
+        batch_calls = [
+            event["llm_call"]
+            for event in active_recorder.events[usage_before["llm_calls"] :]
+            if "effective_batch_size" in event.get("llm_call", {})
+        ]
+        if batch_calls:
+            metrics["batch_metadata_calls"] = len(batch_calls)
+            metrics["oom_fallback_calls"] = sum(
+                bool(call.get("oom_fallback")) for call in batch_calls
+            )
+            metrics["oom_max_split_depth"] = max(
+                int(call.get("oom_split_depth", 0)) for call in batch_calls
+            )
         reviewer_output = {
             "round": self.num_rounds,
             "agent_id": self.reviewer.id,

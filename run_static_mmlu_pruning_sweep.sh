@@ -36,6 +36,7 @@ CONDA_BIN="${CONDA_BIN:-/egr/research-optml/ruoyu.chen/anaconda3/bin/conda}"
 CONDA_ENV="${CONDA_ENV:-agentprune}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 SAVE_EVAL_TRACES="${SAVE_EVAL_TRACES:-0}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-1}"
 SKIP_COMPLETED="${SKIP_COMPLETED:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 
@@ -67,7 +68,11 @@ Useful overrides:
   CUDA_VISIBLE_DEVICES, RUN_DIR, MODEL_PATH, MMLU_DATA_DIR,
   VAL_START_INDEX, VAL_LIMIT, SEED, PRUNING_PERCENTAGES,
   PRUNING_SCOPE=per_round_edge_type|global,
-  SAVE_EVAL_TRACES=1, SKIP_COMPLETED=0, DRY_RUN=1.
+  SAVE_EVAL_TRACES=1, EVAL_BATCH_SIZE=1, SKIP_COMPLETED=0, DRY_RUN=1.
+
+Evaluation batching:
+  EVAL_BATCH_SIZE>1 batches independent questions with greedy decoding only.
+  Default 1 preserves serial execution; existing checkpoints require the same size.
 
 Examples:
   DRY_RUN=1 ./run_static_mmlu_pruning_sweep.sh all
@@ -177,6 +182,22 @@ evaluate_policies() {
     fi
     if ! is_true "${DRY_RUN}" && is_true "${SKIP_COMPLETED}" \
       && [[ -f "${summary_json}" ]]; then
+      "${PYTHON_CMD[@]}" -c '
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+requested = int(sys.argv[2])
+saved = int(json.loads(path.read_text(encoding="utf-8")).get("eval_batch_size", 1))
+if saved != requested:
+    raise SystemExit(
+        f"Completed evaluation at {path} used eval_batch_size={saved}, "
+        f"but EVAL_BATCH_SIZE={requested} was requested. Refusing to reuse it. "
+        "Use the original batch size, or run evaluate_mmlu with a distinct "
+        "--evaluation-name for the new batch size."
+    )
+' "${summary_json}" "${EVAL_BATCH_SIZE}"
       echo "Skipping completed evaluation: ${summary_json}"
       continue
     fi
@@ -192,6 +213,7 @@ evaluate_policies() {
       --split "${VAL_SPLIT}"
       --start-index "${VAL_START_INDEX}"
       --limit "${VAL_LIMIT}"
+      --eval-batch-size "${EVAL_BATCH_SIZE}"
       --seed "${SEED}"
       --resume
       --no-download

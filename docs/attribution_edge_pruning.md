@@ -20,8 +20,9 @@ The current implementation has six goals:
    selected by attribution;
 5. store separate round-specific spatial and temporal matrices with orientation
    `[round][source][target]`;
-6. learn policies from baseline-correct dev samples and evaluate the frozen
-   policy on a complete, disjoint evaluation split.
+6. learn policies from the declared dev calibration selection (final-correct
+   by default, all selected samples in the correctness-aware protocol) and
+   evaluate the frozen policy on a complete, disjoint evaluation split.
 
 Primary implementation modules:
 
@@ -31,7 +32,7 @@ Primary implementation modules:
   execution, exact trace capture, and round-policy replay;
 - `experiments_attrprune/collect_correct.py`: dense benchmark calibration traces;
 - `experiments_attrprune/attribute_edges.py`: per-node attribution, sample
-  matrices, correct-only aggregation, and policy publication;
+  matrices, configurable aggregation scope, and policy publication;
 - `experiments_attrprune/evaluate_benchmark.py`: complete dense/pruned evaluation.
 
 ## 2. Data model and notation
@@ -490,9 +491,14 @@ maximum and the opportunity/candidate indicators remain 1.
 
 Reviewer attribution never enters these worker matrices.
 
-## 12. Correct-only aggregation
+## 12. Aggregation scope
 
-Let \(\mathcal C\) be the verified-correct calibration set with size \(n\).
+Let \(\mathcal C\) be the included calibration set with size \(n\).
+`aggregation_scope=correct` is the backward-compatible default and includes
+only verified-final-correct samples. `aggregation_scope=all` includes every
+successfully processed selected sample regardless of the reviewer's answer.
+`correct_verified` remains the original reviewer's true correctness; it is
+never overwritten to bypass the legacy filter.
 
 Sample mean:
 
@@ -516,6 +522,7 @@ with zero when the denominator is zero.
 
 The aggregate stores:
 
+- `aggregation_scope`, `num_aggregated_samples`, and the true `num_correct_samples`;
 - `sample_mean`;
 - `conditional_mean`;
 - `sum`;
@@ -529,6 +536,60 @@ or reviewer selection.
 Binary conditional mean is an empirical frequency. Token/word conditional mean
 is an average retained-content ratio. Neither is a calibrated causal
 probability.
+
+### 12.1 MMLU and GSM8K correctness-aware routing
+
+`attribution_mode=correctness-aware` is an opt-in MMLU/GSM8K protocol; `original`
+retains the existing recorded-output method. First execute and freeze the entire
+ordinary dense graph. Do not filter upstream messages by their correctness or
+replace them with counterfactual regeneration. Classify each receiving worker
+using an explicit, unambiguous `Decision` field for MMLU or
+`The answer is <number>` field for GSM8K; missing, malformed, or conflicting
+fields take the incorrect-node branch and are reported separately. GSM8K
+normalizes explicit numeric fields; numbers mentioned only in reasoning do not
+count as an answer.
+
+Correct workers retain the existing full-recorded-output objective and recovery
+threshold. For wrong workers, change only the scoring system prompt to
+answer-first and teacher-force the complete `Decision: <gold>` (MMLU) or
+`The answer is <gold number>` (GSM8K) prefix. Numeric answers may span multiple
+tokens; the conditional answer probability covers the entire answer-bearing
+suffix. Rank
+every incoming sentence by exact greedy insertion maximizing raw-logit sum;
+paired deletion scores are diagnostics, not an additional optimization term.
+Choose the earliest maximum of the complete insertion curve, including the
+zero-sentence baseline. This is the existing local gold-prefix experiment, not
+the earlier EAGLE insertion-plus-deletion probability objective.
+
+Retain that subset, restore the original reasoning-first system prompt, and
+generate once with greedy decoding without supplying gold. Success contributes
+the usual selected-source-token ratios. Failure contributes explicit zero
+binary/token/word ratios on every existing incoming edge **with opportunity=1**.
+Thus failures lower the average rather than disappearing from its denominator.
+An empty successful subset also contributes zeros. No-input nodes keep the
+`no_attributable_input` record. Reviewer attribution remains ordinary and is
+excluded from worker matrices.
+
+Raw-logit sum is not a probability. Diagnostics distinguish the joint forced
+prefix probability from the answer-token probability conditioned on the format
+prefix. Neither introduces a threshold or stopping criterion. A full-input
+answer-first generation is retained separately to show prompt-order effects.
+The chosen peak is not guaranteed to minimize sentence count globally, and a
+failed verification only means that this selected subset failed. Sentence
+selection and later removal of whole edges are different interventions; val
+evaluation establishes the latter's performance.
+
+The dev40 launcher uses all 40 fixed dev questions after shuffle seed 888,
+independent of final correctness, and freezes exact trace identities and hashes
+in `calibration/selection_manifest.json`. The attribution mode, aggregation
+scope, gold target, algorithm version, and verification settings participate in
+cache compatibility. Truncation, OOM, and alignment failures preserve diagnostics
+and block aggregate publication, instead of becoming zero-score rescues.
+The GSM8K train40 launcher uses the same rules for train indices 0..39, four
+workers/two rounds, all 28 worker edges globally ranked, and test1319 evaluation.
+Both benchmarks use run-fixed four-character reviewer source IDs, preserved
+through resume and all evaluation ratios. Worker bodies are not anonymized;
+reviewer fan-in remains dense and outside the worker pruning ratio.
 
 ## 13. Deterministic policy construction
 

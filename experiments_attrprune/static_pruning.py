@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import hashlib
+import json
 import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from AgentAttrPrune.attribution import build_pruned_masks
+from AgentAttrPrune.datasets import benchmark_definition
 from AgentAttrPrune.pruning import RoundPolicy
-from experiments_attrprune.common import config_fingerprint, load_json, write_json
+from experiments_attrprune.common import (
+    config_fingerprint,
+    load_json,
+    prompt_contract,
+    validate_prompt_contract,
+    write_json,
+)
 
 
 DEFAULT_PERCENTAGES = (5, 10, 20, 30, 40, 50)
@@ -82,6 +91,30 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _calibration_metadata(aggregate: Mapping[str, Any]) -> dict[str, Any]:
+    """Read explicit calibration counts, retaining the legacy correct-only contract."""
+
+    scope = str(aggregate.get("aggregation_scope", "correct"))
+    correct = int(aggregate.get("num_correct_samples", 0))
+    total = int(aggregate.get("num_aggregated_samples", correct))
+    if scope not in {"correct", "all"}:
+        raise ValueError("Aggregate aggregation_scope must be correct or all")
+    if total < 1:
+        raise ValueError("Aggregate contains no aggregated calibration samples")
+    if correct < 0 or correct > total or (scope == "correct" and correct != total):
+        raise ValueError("Aggregate calibration sample counts are inconsistent")
+    return {
+        "calibration_num_aggregated_samples": total,
+        "calibration_num_correct_samples": correct,
+        "calibration_aggregation_scope": scope,
+        "calibration_attribution_mode": str(
+            (aggregate.get("attribution_configuration") or {}).get(
+                "attribution_mode", "original"
+            )
+        ),
+    }
+
+
 def _validate_sources(
     run_config: Mapping[str, Any],
     aggregate: Mapping[str, Any],
@@ -113,8 +146,7 @@ def _validate_sources(
         raise ValueError(f"Aggregate does not contain metric {metric!r}")
     if statistic not in {"conditional_mean", "sample_mean"}:
         raise ValueError("statistic must be conditional_mean or sample_mean")
-    if int(aggregate.get("num_correct_samples", 0)) < 1:
-        raise ValueError("Aggregate contains no verified-correct calibration samples")
+    _calibration_metadata(aggregate)
 
 
 def build_static_sweep(
@@ -139,6 +171,25 @@ def build_static_sweep(
         raise FileNotFoundError(f"Missing run configuration: {run_config_path}")
     if not aggregate_path.is_file():
         raise FileNotFoundError(f"Missing aggregate attribution matrix: {aggregate_path}")
+    calibration_manifest_path = run_dir / "attribution" / "manifest.json"
+    if calibration_manifest_path.is_file():
+        calibration_manifest = load_json(calibration_manifest_path)
+        if (
+            calibration_manifest.get("failures")
+            or calibration_manifest.get("complete") is False
+            or calibration_manifest.get("aggregation_complete") is False
+        ):
+            raise ValueError(
+                "Calibration attribution is incomplete or has failures; refusing "
+                "to prepare policies from a potentially stale aggregate. "
+                f"Resume calibration first: {calibration_manifest_path}"
+            )
+        published_hash = calibration_manifest.get("aggregate_sha256")
+        if published_hash and published_hash != _file_sha256(aggregate_path):
+            raise ValueError(
+                "Aggregate does not match the completed calibration publication; "
+                "refusing to prepare policies from a stale or changed aggregate"
+            )
 
     run_config = load_json(run_config_path)
     aggregate = load_json(aggregate_path)
@@ -223,7 +274,7 @@ def build_static_sweep(
         "run_config_json": str(run_config_path),
         "aggregate_json": str(aggregate_path),
         "aggregate_sha256": aggregate_sha256,
-        "calibration_num_correct_samples": int(aggregate["num_correct_samples"]),
+        **_calibration_metadata(aggregate),
         "metric": metric,
         "statistic": statistic,
         "unobserved": unobserved,
@@ -238,6 +289,209 @@ def build_static_sweep(
         "policies": entries,
     }
     manifest_path = write_json(output_dir / "manifest.json", manifest)
+    manifest["manifest_json"] = str(manifest_path.resolve())
+    return manifest
+
+
+def transfer_static_sweep(
+    source_run: str | Path,
+    target_run: str | Path,
+    *,
+    percentages: Sequence[int],
+    metric: str = "token_ratio",
+    statistic: str = "conditional_mean",
+    pruning_scope: str = "global",
+) -> dict[str, Any]:
+    """Reuse frozen masks in a new run using the current prompt contract.
+
+    This is an evaluation-only transfer: no calibration artifacts are copied,
+    and every transferred policy records its source fingerprint and file hash.
+    The target directory must not already exist.
+    """
+
+    source_run = Path(source_run).resolve()
+    target_run = Path(target_run).resolve()
+    percentages = _validated_percentages(percentages)
+    if target_run.exists():
+        raise FileExistsError(
+            f"Target run already exists; refusing to overwrite it: {target_run}"
+        )
+
+    source_config_path = source_run / "run_config.json"
+    if not source_config_path.is_file():
+        raise FileNotFoundError(f"Missing source run configuration: {source_config_path}")
+    source_config = load_json(source_config_path)
+    source_fingerprint = source_config.get("fingerprint")
+    if not source_fingerprint or config_fingerprint(source_config) != source_fingerprint:
+        raise ValueError("Source run_config.json has a missing or invalid fingerprint")
+
+    benchmark = str(source_config.get("benchmark", "mmlu")).lower()
+    configured_prompt = prompt_contract(benchmark)
+    prompt_set = benchmark_definition(benchmark).prompt_set
+    prepare_reviewer_ids = getattr(prompt_set, "prepare_reviewer_agent_ids", None)
+    if configured_prompt is None or prepare_reviewer_ids is None:
+        raise ValueError(
+            f"{benchmark} does not declare a transferable reviewer-ID prompt contract"
+        )
+
+    target_config = copy.deepcopy(source_config)
+    target_config["prompt"] = {
+        **configured_prompt,
+        "reviewer_agent_ids": prepare_reviewer_ids(
+            [str(worker["agent_id"]) for worker in source_config["workers"]]
+        ),
+    }
+    target_config["fingerprint"] = config_fingerprint(target_config)
+    validate_prompt_contract(target_config, benchmark=benchmark)
+    target_fingerprint = target_config["fingerprint"]
+
+    source_policy_dir = (
+        _sweep_root(source_run, metric, statistic, pruning_scope) / "policies"
+    )
+    target_sweep_root = _sweep_root(target_run, metric, statistic, pruning_scope)
+    target_policy_dir = target_sweep_root / "policies"
+    split = str((target_config.get("splits") or {}).get("evaluation", "val"))
+    expected_agents = [str(worker["agent_id"]) for worker in source_config["workers"]]
+    expected_roles = [str(worker["role"]) for worker in source_config["workers"]]
+    expected_types = [
+        str(worker.get("agent_type", "AnalyzeAgent"))
+        for worker in source_config["workers"]
+    ]
+
+    transferred: list[tuple[Path, dict[str, Any]]] = []
+    entries: list[dict[str, Any]] = []
+    aggregate_paths: set[Path] = set()
+    for percentage in percentages:
+        label = _policy_label(percentage)
+        source_policy_path = source_policy_dir / f"{label}.json"
+        if not source_policy_path.is_file():
+            raise FileNotFoundError(f"Missing source policy: {source_policy_path}")
+        source_payload = load_json(source_policy_path)
+        source_policy = RoundPolicy.from_dict(source_payload)
+        source_policy.validate_agents(expected_agents)
+        if list(source_policy.agent_roles) != expected_roles:
+            raise ValueError(f"Source policy roles do not match: {source_policy_path}")
+        if list(source_policy.agent_types) != expected_types:
+            raise ValueError(f"Source policy types do not match: {source_policy_path}")
+        if source_policy.num_rounds != int(source_config["num_rounds"]):
+            raise ValueError(f"Source policy round count does not match: {source_policy_path}")
+        if source_policy.metadata.get("run_fingerprint") != source_fingerprint:
+            raise ValueError(f"Source policy fingerprint does not match: {source_policy_path}")
+        if source_policy.metadata.get("metric") != metric:
+            raise ValueError(f"Source policy metric does not match: {source_policy_path}")
+        if source_policy.metadata.get("statistic") != statistic:
+            raise ValueError(f"Source policy statistic does not match: {source_policy_path}")
+        if source_policy.metadata.get("pruning_allocation") != pruning_scope:
+            raise ValueError(
+                f"Source policy pruning allocation does not match: {source_policy_path}"
+            )
+
+        static_sweep = source_payload.get("static_sweep") or {}
+        aggregate_path = Path(
+            static_sweep.get(
+                "aggregate_json",
+                source_run / "attribution" / "aggregate_edge_matrices.json",
+            )
+        ).resolve()
+        if not aggregate_path.is_file():
+            raise FileNotFoundError(f"Missing source aggregate: {aggregate_path}")
+        aggregate_sha256 = _file_sha256(aggregate_path)
+        declared_aggregate_sha256 = static_sweep.get("aggregate_sha256")
+        if declared_aggregate_sha256 and declared_aggregate_sha256 != aggregate_sha256:
+            raise ValueError(
+                f"Source aggregate hash does not match policy: {source_policy_path}"
+            )
+        aggregate_paths.add(aggregate_path)
+
+        payload = copy.deepcopy(source_payload)
+        payload["run_fingerprint"] = target_fingerprint
+        payload["policy_transfer"] = {
+            "kind": "frozen_policy_replay_with_current_prompt",
+            "calibration_reused": True,
+            "source_run": str(source_run),
+            "source_run_fingerprint": source_fingerprint,
+            "source_policy_json": str(source_policy_path.resolve()),
+            "source_policy_sha256": _file_sha256(source_policy_path),
+        }
+        RoundPolicy.from_dict(payload)
+        target_policy_path = (target_policy_dir / f"{label}.json").resolve()
+        transferred.append((target_policy_path, payload))
+
+        retention = payload["retention"]
+        candidate_edges = sum(
+            int(retention[edge_type]["candidate_edges"])
+            for edge_type in ("spatial", "temporal")
+        )
+        retained_edges = sum(
+            int(retention[edge_type]["retained_candidate_edges"])
+            for edge_type in ("spatial", "temporal")
+        )
+        evaluation_name = _evaluation_name(metric, statistic, percentage, pruning_scope)
+        entries.append(
+            {
+                "label": label,
+                "requested_pruning_percent": percentage,
+                "requested_pruning_rate": percentage / 100.0,
+                "effective_candidate_pruning_rate": (
+                    1.0 - retained_edges / candidate_edges if candidate_edges else 0.0
+                ),
+                "candidate_edges": candidate_edges,
+                "retained_edges": retained_edges,
+                "pruned_edges": candidate_edges - retained_edges,
+                "retention_by_edge_type": retention,
+                "policy_json": str(target_policy_path),
+                "evaluation_name": evaluation_name,
+                "evaluation_directory": str(
+                    (
+                        target_run / "evaluation" / f"{evaluation_name}_{split}"
+                    ).resolve()
+                ),
+            }
+        )
+
+    if len(aggregate_paths) != 1:
+        raise ValueError("Transferred policies do not share one source aggregate")
+    aggregate_path = aggregate_paths.pop()
+    aggregate = load_json(aggregate_path)
+    if aggregate.get("run_fingerprint") != source_fingerprint:
+        raise ValueError("Source aggregate fingerprint does not match source run")
+
+    manifest = {
+        "schema_version": 1,
+        "kind": "static_attribution_pruning_sweep",
+        "run_fingerprint": target_fingerprint,
+        "benchmark": benchmark,
+        "run_dir": str(target_run),
+        "run_config_json": str((target_run / "run_config.json").resolve()),
+        "aggregate_json": str(aggregate_path),
+        "aggregate_sha256": _file_sha256(aggregate_path),
+        **_calibration_metadata(aggregate),
+        "metric": metric,
+        "statistic": statistic,
+        "unobserved": str(transferred[0][1].get("unobserved", "keep")),
+        "pruning_scope": (
+            "observed_attributed_edges_global"
+            if pruning_scope == "global"
+            else "observed_attributed_edges_per_round_edge_type"
+        ),
+        "pruning_allocation": pruning_scope,
+        "evaluation_split": split,
+        "percentages": list(percentages),
+        "policy_transfer": {
+            "kind": "frozen_policy_replay_with_current_prompt",
+            "calibration_reused": True,
+            "source_run": str(source_run),
+            "source_run_fingerprint": source_fingerprint,
+        },
+        "policies": entries,
+    }
+
+    target_run.mkdir(parents=True, exist_ok=False)
+    write_json(target_run / "run_config.json", target_config)
+    for target_policy_path, payload in transferred:
+        payload.update(_calibration_metadata(aggregate))
+        write_json(target_policy_path, payload)
+    manifest_path = write_json(target_sweep_root / "manifest.json", manifest)
     manifest["manifest_json"] = str(manifest_path.resolve())
     return manifest
 
@@ -265,6 +519,7 @@ def summarize_static_sweep(manifest_json: str | Path) -> dict[str, Any]:
     run_dir = Path(manifest["run_dir"])
     expected_fingerprint = manifest["run_fingerprint"]
     selection: dict[str, Any] | None = None
+    eval_batch_size: int | None = None
     rows: list[dict[str, Any]] = []
     evaluations: dict[str, Any] = {}
 
@@ -284,11 +539,39 @@ def summarize_static_sweep(manifest_json: str | Path) -> dict[str, Any]:
             entry["policy_json"]
         ).resolve():
             raise ValueError(f"{summary_path} used a different policy")
+        state_paths = {evaluation_dir / "evaluation_state.json"}
+        if summary.get("evaluation_state_json"):
+            state_paths.add(Path(summary["evaluation_state_json"]))
+        existing_state_paths = sorted(path for path in state_paths if path.is_file())
+        if existing_state_paths:
+            policy_payload = RoundPolicy.from_json(entry["policy_json"]).to_dict()
+            policy_fingerprint = hashlib.sha256(json.dumps(
+                policy_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            for state_path in existing_state_paths:
+                state = load_json(state_path)
+                if state.get("policy_fingerprint") != policy_fingerprint:
+                    raise ValueError(
+                        f"{summary_path} evaluation policy fingerprint does not match "
+                        "the current prepared policy; rerun evaluation with a new name "
+                        "or restore the evaluated policy"
+                    )
+        elif manifest.get("calibration_attribution_mode") == "correctness-aware":
+            raise ValueError(
+                f"Missing evaluation_state.json for correctness-aware sweep: {evaluation_dir}"
+            )
         current_selection = {field: summary.get(field) for field in SELECTION_FIELDS}
         if selection is None:
             selection = current_selection
         elif current_selection != selection:
             raise ValueError("Sweep evaluations do not use an identical data selection")
+        current_batch_size = int(summary.get("eval_batch_size", 1))
+        if current_batch_size < 1:
+            raise ValueError(f"{summary_path} declares an invalid eval_batch_size")
+        if eval_batch_size is None:
+            eval_batch_size = current_batch_size
+        elif current_batch_size != eval_batch_size:
+            raise ValueError("Sweep evaluations do not use an identical eval_batch_size")
         if int(summary["candidate_edges"]) != int(entry["candidate_edges"]):
             raise ValueError(f"{summary_path} candidate edge count disagrees with policy")
         if int(summary["retained_edges"]) != int(entry["retained_edges"]):
@@ -317,9 +600,24 @@ def summarize_static_sweep(manifest_json: str | Path) -> dict[str, Any]:
             "accuracy_percent": 100.0 * float(summary["accuracy"]),
             "correct": int(summary["correct"]),
             "total": int(summary["total"]),
+            "eval_batch_size": current_batch_size,
             "prompt_tokens": int(summary["prompt_tokens"]),
             "generated_tokens": int(summary["generated_tokens"]),
             "elapsed_seconds": float(summary["elapsed_seconds"]),
+            "batch_metadata_samples": int(
+                summary.get("generation_batching", {}).get("recorded_samples", 0)
+            ),
+            "samples_without_batch_metadata": int(
+                summary.get("generation_batching", {}).get(
+                    "samples_without_batch_metadata", summary["total"]
+                )
+            ),
+            "oom_fallback_samples": int(
+                summary.get("generation_batching", {}).get("oom_fallback_samples", 0)
+            ),
+            "oom_fallback_calls": int(
+                summary.get("generation_batching", {}).get("oom_fallback_calls", 0)
+            ),
             "policy_json": entry["policy_json"],
             "evaluation_summary_json": str(summary_path.resolve()),
         }
@@ -351,6 +649,14 @@ def summarize_static_sweep(manifest_json: str | Path) -> dict[str, Any]:
         "pruning_allocation": pruning_scope,
         "manifest_json": str(manifest_path),
         "selection": selection,
+        "eval_batch_size": eval_batch_size,
+        "calibration_num_aggregated_samples": int(manifest.get(
+            "calibration_num_aggregated_samples",
+            manifest.get("calibration_num_correct_samples", 0),
+        )),
+        "calibration_num_correct_samples": int(manifest.get("calibration_num_correct_samples", 0)),
+        "calibration_aggregation_scope": str(manifest.get("calibration_aggregation_scope", "correct")),
+        "calibration_attribution_mode": str(manifest.get("calibration_attribution_mode", "original")),
         "rows": rows,
         "evaluations": evaluations,
     }
@@ -399,6 +705,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     prepare.add_argument("--aggregate-json", type=Path, default=None)
 
+    transfer = subparsers.add_parser(
+        "transfer",
+        help=(
+            "Reuse frozen policies in a new run bound to the current prompt "
+            "contract, without rerunning calibration."
+        ),
+    )
+    transfer.add_argument("--source-run", type=Path, required=True)
+    transfer.add_argument("--target-run", type=Path, required=True)
+    transfer.add_argument("--percentages", nargs="+", type=int, required=True)
+    transfer.add_argument(
+        "--metric",
+        choices=("binary", "token_ratio", "word_ratio"),
+        default="token_ratio",
+    )
+    transfer.add_argument(
+        "--statistic",
+        choices=("conditional_mean", "sample_mean"),
+        default="conditional_mean",
+    )
+    transfer.add_argument(
+        "--pruning-scope",
+        choices=("per_round_edge_type", "global"),
+        default="global",
+    )
+
     summarize = subparsers.add_parser(
         "summarize", help="Validate completed evaluations and write summary JSON/CSV."
     )
@@ -425,6 +757,20 @@ def main() -> None:
                 f"  {entry['label']}: pruned {entry['pruned_edges']}/"
                 f"{entry['candidate_edges']} edges -> {entry['policy_json']}"
             )
+        return
+    if args.command == "transfer":
+        manifest = transfer_static_sweep(
+            args.source_run,
+            args.target_run,
+            percentages=args.percentages,
+            metric=args.metric,
+            statistic=args.statistic,
+            pruning_scope=args.pruning_scope,
+        )
+        print(f"Transferred {len(manifest['policies'])} frozen policies")
+        print(f"Source run: {manifest['policy_transfer']['source_run']}")
+        print(f"Target run: {manifest['run_dir']}")
+        print(f"Manifest: {manifest['manifest_json']}")
         return
     summary = summarize_static_sweep(args.manifest)
     print(f"Summary JSON: {summary['summary_json']}")
