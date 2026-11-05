@@ -1,0 +1,151 @@
+{
+  "source_repository": "https://github.com/csgen/SafeSieve.git",
+  "source_commit": "0af1b31474ae0107a4f6876b3dd6beb5dda6a9ac",
+  "note": "Local working-tree snapshots including existing alignment adapters; source_sha256 records actual files, not just HEAD. Repository copy under AgentAttrPrune/baselines: shared-root defaults follow this repository; BASELINES_ATTRPRUNE_ROOT overrides the default.",
+  "files": {
+    "SafeSieve/graph/graph.py": {
+      "source": "SafeSieve/graph/graph.py",
+      "source_sha256": "73ae7f05dc50e3f2700e3817c61b4ddcfc53f52f005ff77d428c178924fd5291",
+      "migration": "copied",
+      "migrated_sha256": "73ae7f05dc50e3f2700e3817c61b4ddcfc53f52f005ff77d428c178924fd5291"
+    },
+    "SafeSieve/graph/node.py": {
+      "source": "SafeSieve/graph/node.py",
+      "source_sha256": "4b321eedded2df9c747a3686951f3ce0e6fdfecd984a0947483b35b672b7baf0",
+      "migration": "copied",
+      "migrated_sha256": "4b321eedded2df9c747a3686951f3ce0e6fdfecd984a0947483b35b672b7baf0"
+    },
+    "SafeSieve/graph/pruning_algorithm.py": {
+      "source": "SafeSieve/graph/pruning_algorithm.py",
+      "source_sha256": "e30eefabfde8e6fe3ca2d3530c9ed1344261cae87dca8de85de51795b2fcc2e5",
+      "migration": "copied",
+      "migrated_sha256": "e30eefabfde8e6fe3ca2d3530c9ed1344261cae87dca8de85de51795b2fcc2e5"
+    },
+    "SafeSieve/graph/edge_matrix.py": {
+      "source": "SafeSieve/graph/edge_matrix.py",
+      "source_sha256": "141258fc15795fb31418c56ca97a04530687b9f03606def3c2cd091be59cd9a0",
+      "migration": "copied",
+      "migrated_sha256": "73b7ec6d2c40503ae6b83929915842520a285492bd3550895b8b52caeb4fa10c"
+    },
+    "SafeSieve/agents/agent_registry.py": {
+      "source": "SafeSieve/agents/agent_registry.py",
+      "source_sha256": "8f467bb64db0a6da0977b546d6838a6fe8219139b0ad5cd11335a1d8f510c5fe",
+      "migration": "copied",
+      "migrated_sha256": "ebeb6d7e8168fb3e469dc1a666216d59ea672baa44855cea75aa3677acef76ad"
+    },
+    "SafeSieve/prompt/mmlu_prompt_set.py": {
+      "source": "SafeSieve/prompt/mmlu_prompt_set.py",
+      "source_sha256": "ee48418d77d7c84ae1e6f86d372e2f1922a4344edea77df15fa95fbf58f63107",
+      "migration": "copied",
+      "migrated_sha256": "ee48418d77d7c84ae1e6f86d372e2f1922a4344edea77df15fa95fbf58f63107"
+    },
+    "SafeSieve/prompt/gsm8k_prompt_set.py": {
+      "source": "SafeSieve/prompt/gsm8k_prompt_set.py",
+      "source_sha256": "6156a0e8798f07a25aa7a45b8bb98bdd2913a6584fee07ea835e4e2b53991e89",
+      "migration": "copied",
+      "migrated_sha256": "6156a0e8798f07a25aa7a45b8bb98bdd2913a6584fee07ea835e4e2b53991e89"
+    },
+    "SafeSieve/prompt/prompt_set.py": {
+      "source": "SafeSieve/prompt/prompt_set.py",
+      "source_sha256": "8290d65ebe4048d2c7acf239c7461e84cd596d0b268c481bb2f30038c3b13feb",
+      "migration": "copied",
+      "migrated_sha256": "8290d65ebe4048d2c7acf239c7461e84cd596d0b268c481bb2f30038c3b13feb"
+    },
+    "SafeSieve/prompt/prompt_set_registry.py": {
+      "source": "SafeSieve/prompt/prompt_set_registry.py",
+      "source_sha256": "a4a88cc3301f55d2bfbbbc1bfc95160c1c0ee2e6e68879c9c8cc3b053f3849fe",
+      "migration": "copied",
+      "migrated_sha256": "a4a88cc3301f55d2bfbbbc1bfc95160c1c0ee2e6e68879c9c8cc3b053f3849fe"
+    },
+    "SafeSieve/prompt/common.py": {
+      "source": "SafeSieve/prompt/common.py",
+      "source_sha256": "5ff4ce22429d7c3f1d25c92e7c1be439996ae88810de69bef3b420d427a2a60f",
+      "migration": "copied",
+      "migrated_sha256": "5ff4ce22429d7c3f1d25c92e7c1be439996ae88810de69bef3b420d427a2a60f"
+    },
+    "experiments/attrprune_mmlu_adapter.py": {
+      "source": "experiments/attrprune_mmlu_adapter.py",
+      "source_sha256": "10655a182002d7e6508a0d4637b9833b00973aa1f436e2b0fc8605112c301f57",
+      "migration": "copied; repository-contained default shared-root discovery",
+      "migrated_sha256": "d7fe5ca0dff8614dfb0cdede4bdf628808fd0d2c745bdd086c435f13c4253626"
+    },
+    "experiments/attrprune_gsm8k_seed0_adapter.py": {
+      "source": "experiments/attrprune_gsm8k_seed0_adapter.py",
+      "source_sha256": "51d79cc7df214a63e331366432501d03498b038b449a7875d6b5292f61ce4c40",
+      "migration": "copied; repository-contained default shared-root discovery",
+      "migrated_sha256": "9d572c5b2c16e65bdc44520b20e20153d235fc6c4b01edcfb2f8227afaecb67e"
+    },
+    "experiments/run_mmlu_attrprune_aligned.py": {
+      "source": "experiments/run_mmlu_attrprune_aligned.py",
+      "source_sha256": "a52bc8dfb3e9060953d744ae9403291e11c51a8a8a7dc00a71eaea0ed9ca6ca9",
+      "migration": "copied",
+      "migrated_sha256": "f268d330ff524bde397881e0f5bebd53250ca983c52a32dc43a6d169cb369dab"
+    },
+    "experiments/run_gsm8k_attrprune_seed0.py": {
+      "source": "experiments/run_gsm8k_attrprune_seed0.py",
+      "source_sha256": "b5cffa34a2c362f874204d5e9aeb7dc53facd7e1db67fd452f801de7079a93b0",
+      "migration": "copied",
+      "migrated_sha256": "ad8cff573c8237de447af7748af028f85eea1a31d6fae4131e818a8227fb2418"
+    },
+    "SafeSieve/graph/prompt_similarity.py": {
+      "source": "SafeSieve/graph/prompt_similarity.py",
+      "source_sha256": "9c405170a121778f3d7c592a1faa147b656c5f9eb7287007375497f6be3efd8c",
+      "migration": "extracted unchanged functions: _build_evaluation_prompt",
+      "migrated_sha256": "f91f31e39a26a4fde5e212af7c7c7d21c9ed767278ff2d02e947e43a3f6fdbab"
+    },
+    "experiments/run_gsm8k.py": {
+      "source": "experiments/run_gsm8k.py",
+      "source_sha256": "0eba6dea1de7d9a0f0a152b472e6c0960d8fe19181a3998644cb92573d02b267",
+      "migration": "extracted unchanged functions: score_answer, remove_isolated_nodes, parse_similarity_score",
+      "migrated_sha256": "48f3a36d0ef3a76541b26efd5eaa701d631cb9796b70513d2690886a6916653a"
+    },
+    "datasets/gsm8k_dataset.py": {
+      "source": "datasets/gsm8k_dataset.py",
+      "source_sha256": "6a9c4b743e803592d357c63b77fb42ea687ad24524c75ede86f62a6232e23880",
+      "migration": "extracted unchanged functions: gsm_get_predict, _fix_sqrt, delete_extra_zero, _fix_fracs, _fix_a_slash_b, _remove_right_units, _strip_string",
+      "migrated_sha256": "b1455fc473da172d1858280976dcf1eff13b0240434b439080d38b9a3ba2b734"
+    },
+    "datasets/mmlu_dataset.py": {
+      "source": "datasets/mmlu_dataset.py",
+      "source_sha256": "5cb05d157bd5dbe766625cdb0cd23ccd491defc75f0c7be5f43524c5aacb6709",
+      "migration": "extracted unchanged postprocess_answer method",
+      "migrated_sha256": "38dacd4da1381f553549816327fd59d2ef3d8d24cb5135bd01602df2ca3b561f"
+    },
+    "assets/mmlu_similarity.log": {
+      "source": "logs/mmlu_qwen3_8b_pruning_20260903_125708.log",
+      "source_sha256": "0d08160d12d9447193b22b76db0dc677c516fc0f86d0a26d35dc0e667075fdbf",
+      "migration": "exact role/model/matrix excerpt; original logged matrix precision retained",
+      "migrated_sha256": "5c73ff96ad7bce5cf08dc7b5a435091da860f707e544eaa6debda60e0e9c8e67"
+    },
+    "assets/gsm8k_original/run_config.json": {
+      "source": "result/gsm8k/qwen3_8b_pruning_20261028_054239_3321508/run_config.json",
+      "source_sha256": "815fa5ae755f27d49962a49c80bbbc1bb8659e0f553eb3e97f1f80347e3a731b",
+      "migration": "copied",
+      "migrated_sha256": "815fa5ae755f27d49962a49c80bbbc1bb8659e0f553eb3e97f1f80347e3a731b"
+    },
+    "assets/gsm8k_original/similarity.json": {
+      "source": "result/gsm8k/qwen3_8b_pruning_20261028_054239_3321508/similarity.json",
+      "source_sha256": "3ad3057e06d03df4858d73afb93959f348319ac5a9ea57a4568b22609aabb44a",
+      "migration": "copied",
+      "migrated_sha256": "3ad3057e06d03df4858d73afb93959f348319ac5a9ea57a4568b22609aabb44a"
+    },
+    "assets/gsm8k_aligned_similarity.json": {
+      "source": "result/gsm8k/attrprune_aligned_role_similarity.json",
+      "source_sha256": "4e67862ce984356d8ca1ad679dc6917e6213b959f844087555d856d2ff6e495c",
+      "migration": "copied",
+      "migrated_sha256": "4e67862ce984356d8ca1ad679dc6917e6213b959f844087555d856d2ff6e495c"
+    },
+    "tests/test_mmlu_attrprune_aligned.py": {
+      "source": "tests/test_mmlu_attrprune_aligned.py",
+      "source_sha256": "6f2d67b3a3215cf8abff3c2e1a6a44ea81f949326d67fc740580768d76c7d215",
+      "migration": "selected existing offline prompt/batching/pruning/resume tests",
+      "migrated_sha256": "9fb342a395c76d3f347c4b32c7e7409e3dd46653a76d81c5d8a34461e02f88ca"
+    },
+    "tests/test_gsm8k_attrprune_seed0.py": {
+      "source": "tests/test_gsm8k_attrprune_seed0.py",
+      "source_sha256": "42b93f707d63d5c3aac88fbd2228991149e6c650c17af51fb3e1a918bfad0c9b",
+      "migration": "selected existing offline prompt/batching/pruning/resume tests",
+      "migrated_sha256": "a79501c46f1dd098c7c44ba38853bda67c01056ff55d84bb80e456c0de29aa69"
+    }
+  }
+}

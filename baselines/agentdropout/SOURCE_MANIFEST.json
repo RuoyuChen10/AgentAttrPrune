@@ -1,0 +1,33 @@
+{
+  "source_repository": "/egr/research-optml/ruoyu.chen/Project/AgentDropout",
+  "source_head": "855befab08df60ac734c9608b3b2f317ce687e6e",
+  "source_files": {
+    "AgentDropout/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "AgentDropout/agents/agent_registry.py": "4ab1ec014f9b6878c3bac87523ee202b03bba0f3b004b30b41992ffba6eb7725",
+    "AgentDropout/graph/__init__.py": "bd5cdff9f006f85c6a9613ffdf496728a4946d259a22448f895593b030941420",
+    "AgentDropout/graph/graph.py": "8c1e626de6685eac83d45cef1fd6e44558c3c9263e44b23e48899a70b9da50f9",
+    "AgentDropout/graph/node.py": "a7f72929e4e68ce7e680bd3ae57405a5eb4b735508d1aafb90d06d2e865a5f93",
+    "AgentDropout/llm/format.py": "26d54aed24c94a03f36b67535978cb11055b77bc6b5f34aafa174c16a186ca98",
+    "AgentDropout/llm/hf_chat.py": "4f13d19e959908a438ac097f926a5828c3bc5f368ed07d2a295de914277721a2",
+    "AgentDropout/llm/llm.py": "f3f83a649ab0f17769127e295fed1b0989ea5c9bc1f4bd86c200e8566f74bdcd",
+    "AgentDropout/llm/llm_registry.py": "82cf5048703e9d33d118a9a411c92c66c68f470c21e4e4b859bb9726917c9312",
+    "AgentDropout/utils/utils.py": "b8d538aaa4234a8637de53daa055e4f0d8a83ed1a628e3d57fa5391598b57410",
+    "datasets/gsm8k_dataset.py": "3ab32afc32590132f04be6d905c53bfb59afc483852308282cba1edf25f79031",
+    "datasets/mmlu_dataset.py": "9fdd714990c0d8274a3ae65a0f1f7135470f7d486a0ee48149f9ccf563a6b6b8",
+    "experiments/accuracy.py": "d3e14a25cd00b60cfa500c70d6bcabed44f1838d1851b44b17a4348427beb563",
+    "experiments/aligned_evaluate_mmlu.py": "9a9d2f139dbf1de82074799a752dfcc60134e821107fb6332994ce8c056b2a6f",
+    "experiments/aligned_train_mmlu.py": "0dcb1cd4ff7a1cc7a2ccebff1ee8dce42f5569962bfd0c9a5d9ead89b06088bf",
+    "experiments/dropout_artifacts.py": "4b247d766977c1a4960469b82f67eaba36e82a6d4b78b491267fd3d6601a96d6",
+    "experiments/evaluate_gsm8k_seed0_sampled.py": "bff3cd7c629d1a527ebb3be7c1568c5b4c307276741a066c07576a0287ca603e",
+    "experiments/evaluate_mmlu_dev40_sampled.py": "8f6c125cbb5ba7cded56335bf005ff6555003d89bd219eb0055d765e5a0f3bb6",
+    "experiments/gsm8k_seed0_prompt_adapter.py": "8f55eb8501cb298c147ea5577e5965b838dcfd5a94e90f67da8b5a7cc8877090",
+    "experiments/mmlu_dev40_prompt_adapter.py": "ed12366531f970741f85eac55d9f4e70c3e465d869b11976f472e8d534c2f709",
+    "experiments/run_gsm8k_aligned.py": "6de62767a6071d5608b813181ad8ac3af1136904613f7348484dbe7d3a48ae96",
+    "experiments/run_gsm8k_attrprune_seed0.py": "f2ea4682b09b1d5a658ad1081569df9aa5cd634cf504da6ac3e4ee0c418cafd7",
+    "experiments/run_mmlu_attrprune_dev40.py": "4dc0aadeebba3257caae0193a4fe63da1f8eba8a78a23b72fe809414add9843a",
+    "experiments/traced_original_graph.py": "1649417083d8b6b2858021564309a888e956a69dae1666a8dcfc6e6af393bba2",
+    "tests/test_gsm8k_attrprune_seed0.py": "5b2f240d95c8134079ab9030d49c586abe75ac6b4b0832f813a1d6cb6094ca3a",
+    "tests/test_mmlu_attrprune_dev40.py": "6fb0fcb8868c3a2f24313f2a80076992bbb3231c9f3c2a9b33ff570a1aa8c763"
+  },
+  "note": "Hashes identify local source contents, including pre-existing uncommitted alignment changes. Runtime uses only migrated files and the explicit AgentAttrPrune dependency."
+}

@@ -1,0 +1,2 @@
+# Install/use AgentAttrPrune's dependencies first; this is the extra baseline registry dependency.
+class-registry==2.1.2

@@ -1,0 +1,19 @@
+{
+  "num_rounds": 2,
+  "num_iterations": 40,
+  "train_batch_size": 1,
+  "samples_per_query": 10,
+  "lr": 0.1,
+  "prune_at_end": true,
+  "pruning_rate": 0.5,
+  "low_rank_regularization": true,
+  "delta": 0.1,
+  "seed": 0,
+  "max_new_tokens": 2048,
+  "optimized_spatial": true,
+  "optimized_temporal": true,
+  "agent_nums": [
+    4
+  ],
+  "mode": "FullConnected"
+}

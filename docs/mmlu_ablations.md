@@ -55,6 +55,7 @@ node-completion records must validate before a complete matrix is published.
 | Protocol | Calibration | Inference-time behavior |
 |---|---|---|
 | Original fixed order | Same canonical order, 40 traces | Global static pruning of 45 candidates |
+| Original fixed order, uniform allocation | Reuse the same seed-0 fixed-order matrix | Independently prune each round/edge-type matrix; static execution |
 | Random-order dense | Independent order for each question/repeat/round | Attribution experiment; no validation or pruning |
 | Sampled global/uniform | Completed random-order dev40 matrix | Hard prune 65 candidates, then sigmoid/Bernoulli sampling with spatial cycle rejection |
 | Row-minus-column: direct | Project the existing random-order matrix into a frozen order | Global static pruning of 45 forward candidates |
@@ -66,6 +67,32 @@ node-completion records must validate before a complete matrix is published.
 Every requested pruning rate starts independently from the unpruned source
 matrix. Static policies execute every retained edge on every question. Only the
 explicit sampled protocol applies Bernoulli draws.
+
+## Fixed-order global versus uniform allocation
+
+```bash
+CUDA_VISIBLE_DEVICES=6,7 ./run_mmlu_fixed_order_uniform.sh
+```
+
+This comparison reuses `dev40_correctness_aware`, the source of the original
+77.34% global-80 result, without collecting or attributing new samples. It keeps
+the same fixed worker order, two full rounds, model, prompts, reviewer aliases,
+seed, 1,531 validation questions, and evaluation batch size 4. Only pruning
+allocation changes from `global` to `per_round_edge_type` (uniform).
+
+| Pruning percentage | Round-0 spatial | Round-1 spatial | Round-1 temporal | Total retained |
+|---|---:|---:|---:|---:|
+| 50% | 5 | 5 | 13 | 23 |
+| 60% | 4 | 4 | 10 | 18 |
+| 80% | 2 | 2 | 5 | 9 |
+
+All retained edges are used for every question. No sigmoid/Bernoulli sampling,
+reordering, or empty-final-round shortcut is introduced. The launcher runs the
+three rates sequentially with resume enabled and keeps original global artifacts
+unchanged. Uniform policies use
+`attribution/static_pruning/token_ratio_conditional_mean/`; their evaluation
+names are `static_token_ratio_conditional_mean_prune_<rate>pct_val`, following
+the existing naming convention without the `_global` suffix.
 
 ## Random order: 400 rollouts and the 40-rollout subset
 

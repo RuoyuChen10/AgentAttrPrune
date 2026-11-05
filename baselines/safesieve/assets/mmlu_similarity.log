@@ -1,0 +1,8 @@
+MMLU roles: ['Knowlegable Expert', 'Critic', 'Mathematician', 'Psychologist', 'Historian']
+>>> Using LLM expert scoring for similarity calculation (model: gpt-5.6-sol)
+>>> Initial Similarity Matrix:
+[[0.   0.44 0.68 0.45 0.65]
+ [0.44 0.   0.65 0.58 0.65]
+ [0.68 0.65 0.   0.58 0.52]
+ [0.45 0.58 0.58 0.   0.7 ]
+ [0.65 0.65 0.52 0.7  0.  ]]

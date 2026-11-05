@@ -1,0 +1,189 @@
+{
+  "train_dataset_json": "/egr/research-optml/ruoyu.chen/Project/SafeSieve/datasets/gsm8k_agentprune/train.jsonl",
+  "dataset_json": "/egr/research-optml/ruoyu.chen/Project/SafeSieve/datasets/gsm8k_agentprune/gsm8k.jsonl",
+  "expected_questions": 1319,
+  "train_questions": 40,
+  "batch_size": 4,
+  "num_rounds": 2,
+  "seed": 0,
+  "llm_name": "local:/egr/research-optml/ruoyu.chen/Models/Qwen3-8B",
+  "max_new_tokens": 2048,
+  "run_dir": "/egr/research-optml/ruoyu.chen/Project/SafeSieve/result/gsm8k/qwen3_8b_pruning_20261028_054239_3321508",
+  "use_llm_similarity": true,
+  "similarity_model": "gpt-5.6-sol",
+  "similarity_max_score": 10.0,
+  "pruning_rate": 0.25,
+  "start_pruning_batch": 10,
+  "imp_per_iterations": 5,
+  "max_pruning_times": 7,
+  "min_agents": 2,
+  "alpha_weight": 0.5,
+  "beta_growth_rate": 1.0,
+  "min_threshold": 0.65,
+  "max_threshold": 0.9,
+  "check_only": false,
+  "domain": "gsm8k",
+  "mode": "FullConnected",
+  "worker_roles": [
+    "Math Solver",
+    "Mathematical Analyst",
+    "Programming Expert",
+    "Inspector"
+  ],
+  "worker_count": 4,
+  "total_agents_including_reviewer": 5,
+  "decision_method": "FinalRefer",
+  "reviewer_prompt": "unchanged SafeSieve GSM8K decision prompt",
+  "reviewer_message_order": "node insertion order, no shuffle",
+  "training_dataset_size": 7473,
+  "evaluation_questions": 1319,
+  "training_selection": "first train_questions records in source order",
+  "calibration_method": "successful sampled edges update statistics; no optimizer or logit training",
+  "optimized_spatial": true,
+  "optimized_temporal": false,
+  "initial_spatial_logits": 0.5,
+  "evaluation_policy": "frozen logits and masks; spatial sampling remains enabled",
+  "similarity_method": "llm",
+  "decoding": {
+    "temperature": 0.2,
+    "max_new_tokens": 2048,
+    "override_repository_defaults": true
+  },
+  "environment": {
+    "CUDA_VISIBLE_DEVICES": "0,1",
+    "HF_CHAT_ENABLE_THINKING": "0",
+    "HF_CHAT_TOP_P": null,
+    "HF_CHAT_TOP_K": null
+  },
+  "dataset_paths": {
+    "train": "/egr/research-optml/ruoyu.chen/Project/AgentPrune/dataset/gsm8k/train.jsonl",
+    "test": "/egr/research-optml/ruoyu.chen/Project/AgentPrune/dataset/gsm8k/gsm8k.jsonl"
+  },
+  "dataset_sha256": {
+    "train": "17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465",
+    "test": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14"
+  },
+  "source_sha256": {
+    "experiments/run_gsm8k.py": "0eba6dea1de7d9a0f0a152b472e6c0960d8fe19181a3998644cb92573d02b267",
+    "SafeSieve/prompt/gsm8k_prompt_set.py": "6156a0e8798f07a25aa7a45b8bb98bdd2913a6584fee07ea835e4e2b53991e89",
+    "SafeSieve/agents/math_solver.py": "b54639bd50a62f51aab614c2a70b7c9f0e579f624091af552f8a9bfb1d581cba",
+    "SafeSieve/agents/final_decision.py": "a88b68d7cdfadc2bfa21932aeca7e7af46ccfb1b942decb00274b7b08e9d2b06",
+    "SafeSieve/graph/graph.py": "73ae7f05dc50e3f2700e3817c61b4ddcfc53f52f005ff77d428c178924fd5291",
+    "SafeSieve/llm/llm.py": "f3b2baf4d099b38c680640d91d6f68075b95180aced563ad5c05a8b5f93eaf65",
+    "SafeSieve/llm/hf_chat.py": "1a86b4f46718d4d56e78221923e4eac8e6fd3ca33d3ea7f559bb505ea6643f8e"
+  },
+  "calibration_batches": 10,
+  "possible_pruning_batches": [
+    10
+  ],
+  "started_at_utc": "2026-10-27T21:42:44.068903+00:00",
+  "initial_policy": {
+    "node_order": [
+      "825W",
+      "5YhY",
+      "4CiH",
+      "89qX"
+    ],
+    "nodes": [
+      {
+        "id": "825W",
+        "role": "Math Solver",
+        "model": "local:/egr/research-optml/ruoyu.chen/Models/Qwen3-8B"
+      },
+      {
+        "id": "5YhY",
+        "role": "Mathematical Analyst",
+        "model": "local:/egr/research-optml/ruoyu.chen/Models/Qwen3-8B"
+      },
+      {
+        "id": "4CiH",
+        "role": "Programming Expert",
+        "model": "local:/egr/research-optml/ruoyu.chen/Models/Qwen3-8B"
+      },
+      {
+        "id": "89qX",
+        "role": "Inspector",
+        "model": "local:/egr/research-optml/ruoyu.chen/Models/Qwen3-8B"
+      }
+    ],
+    "reviewer": {
+      "id": "4LbQ",
+      "method": "FinalRefer",
+      "model": "local:/egr/research-optml/ruoyu.chen/Models/Qwen3-8B"
+    },
+    "optimized_spatial": true,
+    "optimized_temporal": false,
+    "spatial_logits": [
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5
+    ],
+    "temporal_logits": [
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0
+    ],
+    "spatial_masks": [
+      0,
+      1,
+      1,
+      1,
+      1,
+      0,
+      1,
+      1,
+      1,
+      1,
+      0,
+      1,
+      1,
+      1,
+      1,
+      0
+    ],
+    "temporal_masks": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ]
+  }
+}

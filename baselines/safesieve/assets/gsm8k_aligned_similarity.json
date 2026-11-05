@@ -1,0 +1,129 @@
+{
+  "configuration": {
+    "mode": "aligned_roles",
+    "engine": "gpt-5.6-sol",
+    "task_type": "GSM8K",
+    "max_score": 10.0,
+    "roles": [
+      "Math Solver",
+      "Mathematical Analyst",
+      "Programming Expert",
+      "Inspector"
+    ],
+    "role_descriptions": [
+      "You are a math expert. Solve the word problem step by step and check that every operation follows from the quantities in the question.",
+      "You are a mathematical analyst. Translate the problem into variables and equations before substituting the numerical values.",
+      "You are a programming expert. Independently verify the arithmetic, using short Python-like calculations when they make the result clearer.",
+      "You are an exacting inspector. Look for unit mistakes, ambiguous interpretations, missing operations, and arithmetic errors."
+    ],
+    "old_role_descriptions_differ": true,
+    "interpretation": "Recompute original expert-scoring algorithm on aligned role descriptions",
+    "external_calls_if_uncached": 6
+  },
+  "pairs": [
+    {
+      "i": 0,
+      "j": 1,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are a task evaluation expert, now need to arrange multiple agents to collaborate on GSM8K dataset tasks.\n\nPlease evaluate the collaboration complementarity of the following two agent role descriptions in solving GSM8K problems:\n\n<Role A Description>\nYou are a math expert. Solve the word problem step by step and check that every operation follows from the quantities in the question.\n</Role A Description>\n\n<Role B Description>\nYou are a mathematical analyst. Translate the problem into variables and equations before substituting the numerical values.\n</Role B Description>\n\nScoring Criteria:\n- 0-3.0 points: Completely irrelevant, two roles have no collaboration value in solving GSM8K problems\n- 3.0-5.0 points: Generally related, some collaboration potential but weak complementarity\n- 5.0-7.0 points: Good complementarity, two roles can play different roles\n- 7.0-9.0 points: Very good complementarity, two roles can form effective collaboration in problem solving\n- 9.0-10.0 points: Perfect complementarity, two roles can perfectly cooperate to solve complex problems\n\nPlease carefully analyze the capability characteristics, problem-solving methods, and professional domains of the two roles, then give a numerical score between 0 and 10.0.\n\nImportant: You must return a precise numerical value between 0 and 10.0, format like: \"Score: X.X\" (where X.X is the specific value)."
+        }
+      ],
+      "response": "Score: 7.5",
+      "score": 7.5,
+      "recorded_utc": "2026-11-04T16:30:21.306902+00:00"
+    },
+    {
+      "i": 0,
+      "j": 2,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are a task evaluation expert, now need to arrange multiple agents to collaborate on GSM8K dataset tasks.\n\nPlease evaluate the collaboration complementarity of the following two agent role descriptions in solving GSM8K problems:\n\n<Role A Description>\nYou are a math expert. Solve the word problem step by step and check that every operation follows from the quantities in the question.\n</Role A Description>\n\n<Role B Description>\nYou are a programming expert. Independently verify the arithmetic, using short Python-like calculations when they make the result clearer.\n</Role B Description>\n\nScoring Criteria:\n- 0-3.0 points: Completely irrelevant, two roles have no collaboration value in solving GSM8K problems\n- 3.0-5.0 points: Generally related, some collaboration potential but weak complementarity\n- 5.0-7.0 points: Good complementarity, two roles can play different roles\n- 7.0-9.0 points: Very good complementarity, two roles can form effective collaboration in problem solving\n- 9.0-10.0 points: Perfect complementarity, two roles can perfectly cooperate to solve complex problems\n\nPlease carefully analyze the capability characteristics, problem-solving methods, and professional domains of the two roles, then give a numerical score between 0 and 10.0.\n\nImportant: You must return a precise numerical value between 0 and 10.0, format like: \"Score: X.X\" (where X.X is the specific value)."
+        }
+      ],
+      "response": "Score: 8.5",
+      "score": 8.5,
+      "recorded_utc": "2026-11-04T16:30:24.207500+00:00"
+    },
+    {
+      "i": 0,
+      "j": 3,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are a task evaluation expert, now need to arrange multiple agents to collaborate on GSM8K dataset tasks.\n\nPlease evaluate the collaboration complementarity of the following two agent role descriptions in solving GSM8K problems:\n\n<Role A Description>\nYou are a math expert. Solve the word problem step by step and check that every operation follows from the quantities in the question.\n</Role A Description>\n\n<Role B Description>\nYou are an exacting inspector. Look for unit mistakes, ambiguous interpretations, missing operations, and arithmetic errors.\n</Role B Description>\n\nScoring Criteria:\n- 0-3.0 points: Completely irrelevant, two roles have no collaboration value in solving GSM8K problems\n- 3.0-5.0 points: Generally related, some collaboration potential but weak complementarity\n- 5.0-7.0 points: Good complementarity, two roles can play different roles\n- 7.0-9.0 points: Very good complementarity, two roles can form effective collaboration in problem solving\n- 9.0-10.0 points: Perfect complementarity, two roles can perfectly cooperate to solve complex problems\n\nPlease carefully analyze the capability characteristics, problem-solving methods, and professional domains of the two roles, then give a numerical score between 0 and 10.0.\n\nImportant: You must return a precise numerical value between 0 and 10.0, format like: \"Score: X.X\" (where X.X is the specific value)."
+        }
+      ],
+      "response": "Score: 8.8",
+      "score": 8.8,
+      "recorded_utc": "2026-11-04T16:30:27.594336+00:00"
+    },
+    {
+      "i": 1,
+      "j": 2,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are a task evaluation expert, now need to arrange multiple agents to collaborate on GSM8K dataset tasks.\n\nPlease evaluate the collaboration complementarity of the following two agent role descriptions in solving GSM8K problems:\n\n<Role A Description>\nYou are a mathematical analyst. Translate the problem into variables and equations before substituting the numerical values.\n</Role A Description>\n\n<Role B Description>\nYou are a programming expert. Independently verify the arithmetic, using short Python-like calculations when they make the result clearer.\n</Role B Description>\n\nScoring Criteria:\n- 0-3.0 points: Completely irrelevant, two roles have no collaboration value in solving GSM8K problems\n- 3.0-5.0 points: Generally related, some collaboration potential but weak complementarity\n- 5.0-7.0 points: Good complementarity, two roles can play different roles\n- 7.0-9.0 points: Very good complementarity, two roles can form effective collaboration in problem solving\n- 9.0-10.0 points: Perfect complementarity, two roles can perfectly cooperate to solve complex problems\n\nPlease carefully analyze the capability characteristics, problem-solving methods, and professional domains of the two roles, then give a numerical score between 0 and 10.0.\n\nImportant: You must return a precise numerical value between 0 and 10.0, format like: \"Score: X.X\" (where X.X is the specific value)."
+        }
+      ],
+      "response": "Role A handles semantic translation and equation formulation, while Role B independently checks numerical execution and arithmetic. This creates a strong formulate–verify workflow that reduces both modeling and calculation errors. Complementarity is very good, though not perfect because GSM8K problems rarely require actual programming and Role B may not independently challenge incorrect assumptions in the initial model.\n\nScore: 8.6",
+      "score": 8.6,
+      "recorded_utc": "2026-11-04T16:30:31.771389+00:00"
+    },
+    {
+      "i": 1,
+      "j": 3,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are a task evaluation expert, now need to arrange multiple agents to collaborate on GSM8K dataset tasks.\n\nPlease evaluate the collaboration complementarity of the following two agent role descriptions in solving GSM8K problems:\n\n<Role A Description>\nYou are a mathematical analyst. Translate the problem into variables and equations before substituting the numerical values.\n</Role A Description>\n\n<Role B Description>\nYou are an exacting inspector. Look for unit mistakes, ambiguous interpretations, missing operations, and arithmetic errors.\n</Role B Description>\n\nScoring Criteria:\n- 0-3.0 points: Completely irrelevant, two roles have no collaboration value in solving GSM8K problems\n- 3.0-5.0 points: Generally related, some collaboration potential but weak complementarity\n- 5.0-7.0 points: Good complementarity, two roles can play different roles\n- 7.0-9.0 points: Very good complementarity, two roles can form effective collaboration in problem solving\n- 9.0-10.0 points: Perfect complementarity, two roles can perfectly cooperate to solve complex problems\n\nPlease carefully analyze the capability characteristics, problem-solving methods, and professional domains of the two roles, then give a numerical score between 0 and 10.0.\n\nImportant: You must return a precise numerical value between 0 and 10.0, format like: \"Score: X.X\" (where X.X is the specific value)."
+        }
+      ],
+      "response": "Score: 8.8",
+      "score": 8.8,
+      "recorded_utc": "2026-11-04T16:30:34.475462+00:00"
+    },
+    {
+      "i": 2,
+      "j": 3,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are a task evaluation expert, now need to arrange multiple agents to collaborate on GSM8K dataset tasks.\n\nPlease evaluate the collaboration complementarity of the following two agent role descriptions in solving GSM8K problems:\n\n<Role A Description>\nYou are a programming expert. Independently verify the arithmetic, using short Python-like calculations when they make the result clearer.\n</Role A Description>\n\n<Role B Description>\nYou are an exacting inspector. Look for unit mistakes, ambiguous interpretations, missing operations, and arithmetic errors.\n</Role B Description>\n\nScoring Criteria:\n- 0-3.0 points: Completely irrelevant, two roles have no collaboration value in solving GSM8K problems\n- 3.0-5.0 points: Generally related, some collaboration potential but weak complementarity\n- 5.0-7.0 points: Good complementarity, two roles can play different roles\n- 7.0-9.0 points: Very good complementarity, two roles can form effective collaboration in problem solving\n- 9.0-10.0 points: Perfect complementarity, two roles can perfectly cooperate to solve complex problems\n\nPlease carefully analyze the capability characteristics, problem-solving methods, and professional domains of the two roles, then give a numerical score between 0 and 10.0.\n\nImportant: You must return a precise numerical value between 0 and 10.0, format like: \"Score: X.X\" (where X.X is the specific value)."
+        }
+      ],
+      "response": "Score: 8.4",
+      "score": 8.4,
+      "recorded_utc": "2026-11-04T16:30:37.276681+00:00"
+    }
+  ],
+  "matrix": [
+    [
+      0.0,
+      0.75,
+      0.85,
+      0.8800000000000001
+    ],
+    [
+      0.75,
+      0.0,
+      0.86,
+      0.8800000000000001
+    ],
+    [
+      0.85,
+      0.86,
+      0.0,
+      0.8400000000000001
+    ],
+    [
+      0.8800000000000001,
+      0.8800000000000001,
+      0.8400000000000001,
+      0.0
+    ]
+  ]
+}

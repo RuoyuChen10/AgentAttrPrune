@@ -48,3 +48,53 @@ PREPARE_ONLY=1 ./run_mmlu_random_order_sampling.sh uniform 50 60
 日志位于 `logs/mmlu_random_order_sampling/<global|uniform>/`，每次执行、每个剪枝率单独保存，包含 UTC 起止时间和退出码。终端会打印准确的输出目录。
 
 结果位于源实验的独立 `evaluation/agentprune_sampling/per_round_sigmoid/` 子目录，保存来源 SHA、候选 mask、logits/概率、逐题 seed、实际采样 mask 和执行顺序、trace、答案及完整性状态。汇总同时报告候选剪枝率和实际消息边数；Bernoulli 与拒环会进一步减少边数，实际执行图的稀疏度并不恒等于 50% 或 60%。
+
+## Continuing a serial 60% evaluation with batch size 4
+
+Stop the corresponding serial evaluator before starting its continuation. The
+following launchers preserve completed batch-1 answers and traces, and run only
+the remaining questions with evaluation batch size 4:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 ./run_mmlu_sampled_batch4_resume.sh global
+CUDA_VISIBLE_DEVICES=2,3 ./run_mmlu_sampled_batch4_resume.sh uniform
+```
+
+Each scope writes to a separate `prune_60pct_batch4_continuation` directory next
+to the original `prune_60pct` directory. The completed 50% results are unchanged.
+Original question identities, sampling seeds, graph masks, and decoding settings
+are retained. Shared source locks prevent concurrent writes by the serial
+evaluator; frozen hashes protect the imported checkpoints. Repeating the command
+resumes the continuation without evaluating completed questions again.
+
+The combined result explicitly records mixed batch-1/batch-4 provenance. It must
+not be reported as a full batch-4 evaluation: numerical differences in batched
+greedy decoding can affect answers. Logs are stored in
+`logs/mmlu_sampled_batch4_continuation/<global|uniform>/`. Use `DRY_RUN=1` to
+print a command without loading a model, or `PREPARE_ONLY=1` to validate and freeze
+the migration after the serial evaluator has stopped.
+
+## Additional 80% evaluations with batch size 4
+
+```bash
+CUDA_VISIBLE_DEVICES=4,5 ./run_mmlu_sampled_80pct.sh
+```
+
+This launcher evaluates global pruning followed by uniform pruning, sequentially
+on the selected GPU pair. Both use batch size 4 from the beginning and the same
+1,531 validation questions, frozen random-order dev40 attribution, per-round
+importance logits, sigmoid probabilities, and question-specific sampling seeds
+as the earlier 50%/60% experiments. Each scope has its own `prune_80pct`
+checkpoint directory and resumes completed questions automatically.
+
+Both scopes retain 13 of 65 candidate edges before sampling. Uniform pruning
+retains 4 Round-0 spatial, 4 Round-1 spatial, and 5 Round-1 temporal candidates.
+For the current source matrix, global pruning retains all 13 candidates in
+Round-0 spatial. The sampled evaluator preserves the original two-round
+execution rule: every worker still executes in Round 1 and the reviewer reads
+Round-1 outputs, including when Round 1 has no active edges. The empty-round
+shortcut from the separate static-pruning experiment is not enabled here.
+
+Use `DRY_RUN=1` to inspect the launch commands or `PREPARE_ONLY=1` to freeze both
+policies and selections without loading a model. Logs are stored in
+`logs/mmlu_sampled_80pct/`. Existing 50%/60% checkpoints remain unchanged.

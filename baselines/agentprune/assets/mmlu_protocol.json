@@ -1,0 +1,23 @@
+{
+  "training_config": {
+    "mode": "FullConnected",
+    "agent_names": [
+      "AnalyzeAgent",
+      "AnalyzeAgent",
+      "AnalyzeAgent",
+      "AnalyzeAgent",
+      "AnalyzeAgent"
+    ],
+    "num_rounds": 2,
+    "num_iterations": 10,
+    "batch_size": 16,
+    "learning_rate": 0.1,
+    "prune_every_iterations": 5,
+    "pruning_rate": 0.25,
+    "optimized_spatial": true,
+    "optimized_temporal": true,
+    "max_new_tokens": 2048,
+    "temperature": 0.0,
+    "seed": 0
+  }
+}

@@ -102,10 +102,28 @@ and 6 worker edges, respectively, because pruning counts use the existing
 rounding rule. Add `0` to both `prepare` and `eval` for a Dense control using the
 same run configuration and reviewer IDs.
 
+To add only the missing seed-0 25% result to the existing local experiment:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 ./run_gsm8k_seed0_25pct.sh
+```
+
+This supplement reuses the completed attribution matrix and evaluates all
+1,319 test questions with batch size 4, resume, and saved traces. It retains
+21 of 28 worker edges (6 Round-0 spatial, 4 Round-1 spatial, and 11 Round-1
+temporal), executes both rounds, and keeps the original global sweep manifest,
+policies, and results unchanged. Its independent metadata is stored under
+`attribution/static_pruning/token_ratio_conditional_mean_global/supplement_25pct/`.
+Use `PREPARE_ONLY=1` for CPU preparation or `DRY_RUN=1` to inspect commands.
+
 The masks are static: each inference executes every retained edge. These
 launchers do not apply sigmoid probabilities or sample Bernoulli edge masks.
 They use the standard two-round evaluator; the optional MMLU experiment that
 skips an entirely empty final round is a separate execution protocol.
+
+For two additional independently sampled training cohorts, use the separate
+[GSM8K resampling workflow](gsm8k_resampling.md). It runs all six global rates
+25/50/60/70/80/90% and applies the conditional empty-final-round shortcut.
 
 Resume is enabled by default and evaluation traces are saved. Reuse the same
 command to resume, with the same batch size and selection. Change `RUN_NAME`

@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+results/
+result/
+logs/
+
+# Required, versioned role-similarity excerpt (overrides repository *.log).
+!/safesieve/assets/mmlu_similarity.log

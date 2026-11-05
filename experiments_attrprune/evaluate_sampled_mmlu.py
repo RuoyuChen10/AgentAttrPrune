@@ -156,7 +156,14 @@ def _reuse_frozen_policy(output: Path, rebuilt: dict) -> dict:
     return frozen
 
 
-def prepare_context(args: argparse.Namespace) -> EvaluationContext:
+def prepare_context(args: argparse.Namespace, *, eval_batch_size: int = 1,
+                    evaluation_version: int | str = EVALUATION_VERSION) -> EvaluationContext:
+    # Defaults preserve every field/fingerprint of the original serial runner.
+    # The additive batched runner freezes its actual batch/version before the
+    # normal checkpoint compatibility checks, including on resume.
+    if (isinstance(eval_batch_size, bool) or not isinstance(eval_batch_size, int)
+            or eval_batch_size < 1):
+        raise ValueError("Evaluation batch size must be positive")
     from AgentAttrPrune.pruning.sampled import prepare_sampling_policy
     run_dir = args.run_dir.resolve()
     config, aggregate, hashes = _source(run_dir)
@@ -197,14 +204,14 @@ def prepare_context(args: argparse.Namespace) -> EvaluationContext:
         raise ValueError("Evaluation must not write into the reference run")
     policy = _reuse_frozen_policy(output, policy)
     state = {
-        "schema_version": 1, "evaluation_version": EVALUATION_VERSION,
+        "schema_version": 1, "evaluation_version": evaluation_version,
         "source_run": str(run_dir), "source_run_fingerprint": config["fingerprint"],
         "source_artifact_sha256": hashes, "source_config": config,
         "output_dir": str(output), "benchmark": "mmlu", "split": args.split,
         "limit": args.limit, "seed": args.seed, "round_policy": "per_round",
         "pruning_scope": args.pruning_scope, "pruning_percent": args.pruning_percent,
         "sampling_policy_sha256": digest(policy), "selection_sha256": digest(selection),
-        "generation_batch_size": 1, "eval_batch_size": 1, "save_traces": True,
+        "generation_batch_size": eval_batch_size, "eval_batch_size": eval_batch_size, "save_traces": True,
         "truncation_policy": "evaluate recorded final answer; report all truncated events",
         "runtime_failure_policy": "retry on resume; never count as incorrect",
         "sampling_seed_rule": "sha256(mmlu_sampled_dag_v1,experiment_seed,sample_index); excludes pruning settings",

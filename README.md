@@ -17,6 +17,8 @@ kept separate from source code and are not distributed with the repository.
 |---|---|
 | [MMLU ablations](docs/mmlu_ablations.md) | Random order, sampled policies, reordered graphs, empty-round skipping, and calibration resampling |
 | [GSM8K experiments](docs/gsm8k_experiments.md) | Train40 calibration, global/uniform static pruning, test evaluation, and visualization |
+| [GSM8K resampling](docs/gsm8k_resampling.md) | Independent seed1/seed2 train40 cohorts and six fixed-order static pruning rates |
+| [Aligned baselines](baselines/README.md) | Minimal AgentPrune, AgentDropout, and SafeSieve runners with shared prompts and inference batch size 4 |
 | [Attribution specification](docs/attribution_edge_pruning.md) | Scoring, sentence search, correctness routing, denominators, and artifact schemas |
 | [Experiment reference](experiments_attrprune/README.md) | General benchmark stages, batching, and legacy workflows |
 | [Dataset setup](data/README.md) | Local layouts, downloads, and calibration/evaluation splits |
@@ -148,6 +150,14 @@ local run: it adds 25% and 70% results without replacing the earlier sweep
 manifest. Its source-preservation checks are tied to that run. Use the general
 profile above for a new installation.
 
+For a uniform-allocation comparison using the same seed-0 matrix and fixed
+execution order, run `CUDA_VISIBLE_DEVICES=6,7 ./run_mmlu_fixed_order_uniform.sh`.
+This evaluates 50%, 60%, and 80% sequentially with batch size 4 and resume enabled.
+Uniform allocation prunes Round-0 spatial, Round-1 spatial, and Round-1 temporal
+independently (`per_round_edge_type`), retaining 23, 18, and 9 worker edges in
+total. Every retained edge is used, both rounds execute, and the original global
+policies and results remain separate. No calibration or attribution is repeated.
+
 ## MMLU ablation workflows
 
 | Experiment | Calibration or policy change | Evaluation behavior |
@@ -210,6 +220,20 @@ cycle checks keep it executable. These probabilities are not learned AgentPrune
 logits or estimates of causal importance. This is an AgentPrune-style graph
 sampling ablation, not a reproduction of its trainable optimizer. See the
 [MMLU guide](docs/mmlu_ablations.md) for exact replay and visualization details.
+
+To accelerate an unfinished serial 60% evaluation, stop its serial process and
+run `CUDA_VISIBLE_DEVICES=0,1 ./run_mmlu_sampled_batch4_resume.sh global`
+(or `CUDA_VISIBLE_DEVICES=2,3 ./run_mmlu_sampled_batch4_resume.sh uniform`).
+The separate continuation checkpoint retains completed answers and evaluates
+only the remaining questions with batch size 4. Results explicitly record mixed
+batch-1/batch-4 provenance; completed 50% results are unchanged. See the
+[continuation instructions](docs/random_order_sampled_pruning.md#continuing-a-serial-60-evaluation-with-batch-size-4).
+
+For additional 80% sampled-policy evaluations, run
+`CUDA_VISIBLE_DEVICES=4,5 ./run_mmlu_sampled_80pct.sh`. This runs global then
+uniform pruning sequentially, both with evaluation batch size 4 from the start.
+It preserves the original two-round sampled execution rule, including empty
+Round 1, and saves independent resumable checkpoints for each scope.
 
 ### Agent ordering: direct projection versus recalibration
 
@@ -277,6 +301,12 @@ CUDA_VISIBLE_DEVICES=0,1 ./run_gsm8k_train40_correctness_aware.sh eval 50 60 80
 Global pruning ranks all 28 worker edges together: 12 spatial and 16 temporal.
 At 50/60/80%, it retains 14/11/6 edges. The four reviewer inputs remain dense.
 
+To supplement the existing seed-0 run with 25% global static pruning, use
+`CUDA_VISIBLE_DEVICES=0,1 ./run_gsm8k_seed0_25pct.sh`. It reuses the existing
+matrix, retains 21 of 28 worker edges, and evaluates all 1,319 test questions
+with batch size 4 and resume enabled. Original sweep metadata and results are
+preserved; no calibration or attribution is repeated.
+
 To compare uniform allocation using the same completed attribution:
 
 ```bash
@@ -290,6 +320,23 @@ Here "uniform" means pruning independently per round and edge type. It is still
 policy/evaluation directories preserve global results. The detailed
 [GSM8K guide](docs/gsm8k_experiments.md) covers numeric answer parsing, data,
 rounding, output paths, and visualization commands.
+
+To draw two additional independent 40-question training cohorts while preserving
+the original fixed order, model, reviewer aliases, and generation seed 0:
+
+```bash
+STAGE=prepare ./run_gsm8k_train40_resampling.sh 1 2
+CUDA_VISIBLE_DEVICES=0,1 ./run_gsm8k_train40_resampling.sh 1 2
+```
+
+Each cohort runs correctness-aware calibration followed by global static
+**25%, 50%, 60%, 70%, 80%, 90%** pruning on the same full test split. The retained
+worker budgets are **21, 14, 11, 8, 6, 3**. Sampling is without replacement within
+each cohort; overlap between cohorts is allowed. These resampling evaluators
+skip Round 1 only when both of its worker edge masks are empty, passing Round 0
+outputs to the reviewer. Results are isolated by cohort and rate, resume is
+enabled, and no accuracy curve is generated. See the
+[GSM8K resampling guide](docs/gsm8k_resampling.md) for configuration and commands.
 
 The general `run_full_gsm8k.sh`, `run_full_humaneval.sh`, and
 `experiments_attrprune/run_*.sh` entrypoints remain available for full-split or

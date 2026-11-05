@@ -1,0 +1,97 @@
+{
+  "source_repository": "https://github.com/yanweiyue/AgentPrune",
+  "local_source_revision": "c544dd6a1858c02c6d5d371d23c6e6ff55e0be21",
+  "note": "Files snapshot the local working tree, including local aligned adapters/runners; source hashes identify exact inputs. No top-level license file is present in the local source checkout.",
+  "files": [
+    {
+      "source": "AgentPrune/graph/graph.py",
+      "destination": "AgentPrune/graph/graph.py",
+      "source_sha256": "ed82324bc31dd7d375ebe12be9e193deeede5e63f1a37148123e2912bb17b3fb",
+      "migration": "copied; see METHOD.md for portability changes"
+    },
+    {
+      "source": "AgentPrune/graph/node.py",
+      "destination": "AgentPrune/graph/node.py",
+      "source_sha256": "ab1e30fde3b10dedf3d9d12b63fa1685d438f69614c214fad020655ac5108882",
+      "migration": "copied; see METHOD.md for portability changes"
+    },
+    {
+      "source": "AgentPrune/agents/agent_registry.py",
+      "destination": "AgentPrune/agents/agent_registry.py",
+      "source_sha256": "88d119f656f7363618de8f98cf84bc00a14bfea2546e0ba1f9d11ee45775710c",
+      "migration": "copied; see METHOD.md for portability changes"
+    },
+    {
+      "source": "experiments/run_mmlu_attrprune_aligned.py",
+      "destination": "experiments/run_mmlu_attrprune_aligned.py",
+      "source_sha256": "0fcb5adaee554f30c23e57eb10efffb38bd9660c93f0125f5fc827d66c4a4101",
+      "migration": "copied; see METHOD.md for portability changes"
+    },
+    {
+      "source": "experiments/run_gsm8k_attrprune_seed0.py",
+      "destination": "experiments/run_gsm8k_attrprune_seed0.py",
+      "source_sha256": "fc297dd9e61f35999209a8213b3d25c4343f831b37cb578ee008193b824b1c3f",
+      "migration": "copied; see METHOD.md for portability changes"
+    },
+    {
+      "source": "experiments/attrprune_mmlu_prompt_adapter.py",
+      "destination": "experiments/attrprune_mmlu_prompt_adapter.py",
+      "source_sha256": "47818b0e580bace54c88245a949a90c22f80a64eb863a626b376799673ebb96d",
+      "migration": "copied; see METHOD.md for portability changes"
+    },
+    {
+      "source": "experiments/attrprune_gsm8k_seed0_adapter.py",
+      "destination": "experiments/attrprune_gsm8k_seed0_adapter.py",
+      "source_sha256": "7731ffa1373664db7d28800c366d4d7c6a9e658322029f5f7668c8e1ab08b749",
+      "migration": "copied; see METHOD.md for portability changes"
+    },
+    {
+      "source": "experiments/pruning_artifacts.py",
+      "destination": "experiments/pruning_artifacts.py",
+      "source_sha256": "c4db31acca59180dd93f02a9202bf4dfc28ff5aa103e351136570d2b9a172291",
+      "migration": "copied; see METHOD.md for portability changes"
+    },
+    {
+      "source": "tests/test_mmlu_attrprune_aligned.py",
+      "destination": "tests/test_mmlu_attrprune_aligned.py",
+      "source_sha256": "c556b160e8b98d83879e3621aecebfc242c38c5a33dfbe8be4218b1a8a972777",
+      "migration": "copied; see METHOD.md for portability changes"
+    },
+    {
+      "source": "tests/test_gsm8k_attrprune_seed0.py",
+      "destination": "tests/test_gsm8k_attrprune_seed0.py",
+      "source_sha256": "ddeb21a7ee2c4f3c620775948046558db661ab5d9a80d460b94ce23cd5d6c7f6",
+      "migration": "copied; see METHOD.md for portability changes"
+    },
+    {
+      "source": "experiments/run_gsm8k.py",
+      "destination": "experiments/regularization.py",
+      "source_sha256": "9054240a99326eb60f5ad51b501cd9a86671a14b17a0ace7d18c8cd7cfe87bbe",
+      "migration": "extracted graph_regularization verbatim"
+    },
+    {
+      "source": "dataset/mmlu_dataset.py",
+      "destination": "dataset/mmlu_dataset.py",
+      "source_sha256": "6b7d67471cebcddb3f2c39db321d81724741391bc4267e10391d6f8cfce8c7ba",
+      "migration": "extracted only MMLUDataset.postprocess_answer; no baseline dataset loader"
+    },
+    {
+      "source": "dataset/gsm8k_dataset.py",
+      "destination": "dataset/gsm8k_dataset.py",
+      "source_sha256": "d980fa189b40889a63e3471d6eb7914c04daaf94ab0c85418b831615e175a36c",
+      "migration": "extracted gsm_get_predict and helpers; omitted unused dataset loader"
+    },
+    {
+      "source": "experiments_open_source_trace/runs/pruning_full_val_2048_nothink_20260810_035550/pruning_artifacts/learned_edge_policy.json",
+      "destination": "assets/mmlu_protocol.json",
+      "source_sha256": "6bf60a12660cd27888d3c0a9de03ebf72c454b1a1f15f805d8563ba3aa6d9448",
+      "migration": "training configuration snapshot; no learned policy weights"
+    },
+    {
+      "source": "result/gsm8k/qwen3_8b_pruning_20261028_045433_3240555/results.config.json",
+      "destination": "assets/gsm8k_protocol.json",
+      "source_sha256": "f45e24bb2da675213483c309b3383af03cae41ac3750d25404080a6a96a0c0b0",
+      "migration": "training configuration snapshot; no learned policy weights"
+    }
+  ]
+}
